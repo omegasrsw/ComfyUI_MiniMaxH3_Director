@@ -106,6 +106,7 @@ class ExecutionTests(unittest.TestCase):
         self.contexts = []
         self.cleanups = []
         self.reference_each_chunk = True
+        self.reference_calls = []
 
         def conditioning(**kwargs):
             n = kwargs['length']
@@ -116,6 +117,15 @@ class ExecutionTests(unittest.TestCase):
         def encode(vae, audio):
             self.encoded_audio.append(audio)
             return ({'samples': torch.ones(1, 32, 2, round(audio['waveform'].shape[-1] / audio['sample_rate'] * 40))},)
+
+        def reference_conditioning(**kwargs):
+            self.reference_calls.append(kwargs)
+            self.assertNotIn('first_frame', kwargs)
+            self.assertNotIn('ref_audios', kwargs)
+            n = kwargs['length']
+            refs = [{'kind': 'image', 'slot': k} for k in kwargs['ref_images']]
+            return [[torch.zeros(1, 7, 8), {'minimax_refs': refs}]], {'samples': Nested((
+                torch.zeros(1, 24, mc.steps_for_frames(n), 2, 2), torch.zeros(1, 32, 2, round(n / 24 * 40))))}
 
         def sample(**kwargs):
             video, audio = kwargs['latent']['samples'].unbind()
@@ -150,7 +160,9 @@ class ExecutionTests(unittest.TestCase):
             'comfy.nested_tensor': module('comfy.nested_tensor', NestedTensor=Nested),
             'comfy.utils': module('comfy.utils', ProgressBar=lambda n: types.SimpleNamespace(update_absolute=lambda i: None)),
             'comfy_extras': module('comfy_extras'),
-            'comfy_extras.nodes_minimax_h3': module('comfy_extras.nodes_minimax_h3', MiniMaxH3ImageToVideo=types.SimpleNamespace(execute=conditioning)),
+            'comfy_extras.nodes_minimax_h3': module('comfy_extras.nodes_minimax_h3',
+                MiniMaxH3ImageToVideo=types.SimpleNamespace(execute=conditioning),
+                MiniMaxH3ReferenceToVideo=types.SimpleNamespace(execute=reference_conditioning)),
             'comfy_extras.nodes_audio': module('comfy_extras.nodes_audio', VAEEncodeAudio=types.SimpleNamespace(execute=encode)),
             'nodes': module('nodes', VAEDecode=lambda: types.SimpleNamespace(decode=decode)),
         }
@@ -234,6 +246,79 @@ class ExecutionTests(unittest.TestCase):
                 self.run_generation()
         self.assertEqual(len(self.samples), 1)
 
+    def run_reference_generation(self, **kwargs):
+        ref_node = importlib.import_module('mmx_test_package.nodes.director_lipsync_ref').MiniMaxH3DirectorRefAudioLipSync
+        self.audio = {'waveform': torch.linspace(-0.3, 0.4, 44100 * 12 + 7).reshape(1, 1, -1).repeat(1, 2, 1), 'sample_rate': 44100}
+        self.original_waveform = self.audio['waveform'].clone()
+        video_vae = kwargs.pop('video_vae', None)
+        return ref_node().execute(model=None, clip=None, video_vae=video_vae, audio_vae=None, audio=self.audio,
+            ref_image_1=torch.ones(1, 32, 32, 3), ref_image_2=torch.zeros(1, 32, 32, 3),
+            prompt='The character in <Picture 1> in the room in <Picture 2>.', width=32, height=32, **kwargs)
+
+    def test_reference_images_persist_and_audio_is_bitwise_unchanged(self):
+        images, audio, fps, count, report = self.run_reference_generation()
+        self.assertIs(audio, self.audio)
+        self.assertTrue(torch.equal(audio['waveform'], self.original_waveform))
+        self.assertEqual(audio['sample_rate'], 44100)
+        self.assertEqual(audio['waveform'].shape[1], 2)
+        self.assertEqual(count, 289)
+        self.assertEqual(len(images), count)
+        self.assertEqual(len(self.reference_calls), 2)
+        self.assertEqual(len(self.contexts), 1)
+        for call, sample in zip(self.reference_calls, self.samples):
+            self.assertEqual(list(call['ref_images']), ['ref_image_1', 'ref_image_2'])
+            self.assertEqual(len(sample['positive'][0][1]['minimax_refs']), 2)
+        parsed = json.loads(report)
+        self.assertEqual(parsed['generation_mode'], 'ref2va')
+        self.assertEqual(parsed['reference_image_count'], 2)
+        self.assertTrue(parsed['source_audio_locked'])
+
+    def test_reference_path_rejects_audio_regeneration(self):
+        for setting in ({'audio_denoise': 0.1}, {'audio_noise_mask': torch.zeros(1, 1, 1)}):
+            with self.assertRaisesRegex(ValueError, 'locks the input audio'):
+                ls.generate_lipsync(model=None, clip=None, video_vae=None, audio_vae=None,
+                    audio={'waveform': torch.zeros(1, 1, 32000), 'sample_rate': 32000},
+                    prompt='test', width=32, height=32, generation_mode='ref2va',
+                    ref_images={'ref_image_1': torch.zeros(1, 32, 32, 3)}, **setting)
+        self.assertEqual(len(self.samples), 0)
+
+    def test_reference_stabilization_requires_full_scene_reference(self):
+        with self.assertRaisesRegex(ValueError, 'appearance_reference'):
+            self.run_reference_generation(color_stabilization=0.35)
+        self.assertEqual(len(self.reference_calls), 0)
+
+    def test_reference_correction_feeds_exported_tail_without_changing_audio(self):
+        tails, encoded_tails = [], []
+        def encode(frames):
+            tails.append(frames.clone())
+            latent = torch.full((1, 24, mc.steps_for_frames(len(frames)), 2, 2), float(len(tails)))
+            encoded_tails.append(latent.clone())
+            return latent
+
+        # A nonzero decode differs from the reference; use real correction,
+        # then check the actual context passed into the following sample.
+        reference = torch.full((1, 32, 32, 3), 0.3)
+        original_reference = reference.clone()
+        images, audio, fps, count, report = self.run_reference_generation(
+            video_vae=types.SimpleNamespace(encode=encode), chunk_seconds=5.17,
+            appearance_reference=reference, color_stabilization=0.35, detail_stabilization=0.35)
+        parsed = json.loads(report)
+        self.assertEqual(len(tails), 2)
+        self.assertEqual(len(self.reference_calls), 3)
+        self.assertEqual(count, 289)
+        self.assertEqual(fps, 24)
+        self.assertEqual(parsed['context_source'], 'corrected decoded tail')
+        self.assertTrue(parsed['source_audio_locked'])
+        self.assertIs(audio, self.audio)
+        self.assertTrue(torch.equal(audio['waveform'], self.original_waveform))
+        self.assertTrue(torch.equal(reference, original_reference))
+        for tail, encoded, context, chunk in zip(tails, encoded_tails, self.contexts, parsed['chunks']):
+            self.assertTrue(torch.equal(tail, images[chunk['end_frame']-22:chunk['end_frame']]))
+            self.assertTrue(torch.equal(context['context_latent']['samples'].unbind()[0], encoded))
+            self.assertLessEqual(tail.max().item(), 1.0)
+        for sample in self.samples:
+            self.assertEqual(len(sample['positive'][0][1]['minimax_refs']), 2)
+
 
 class WorkflowTests(unittest.TestCase):
     def test_examples_have_reciprocal_links_and_original_audio_output(self):
@@ -255,16 +340,28 @@ class WorkflowTests(unittest.TestCase):
                 for o in n['outputs']:
                     for lid in o.get('links') or []:
                         self.assertIn(lid, links)
-            gen = next(n for n in nodes.values() if n['type'] == 'MiniMaxH3DirectorLongAudioLipSync')
-            create = next(n for n in nodes.values() if n['type'] == 'CreateVideo')
+            gen = next(n for n in nodes.values() if n['type'] in ('MiniMaxH3DirectorLongAudioLipSync', 'MiniMaxH3DirectorRefAudioLipSync'))
+            create = next(n for n in nodes.values() if n['type'] in ('CreateVideo', 'MiniMaxH3SaveVideoExactAudio'))
             audio_link = next(i['link'] for i in create['inputs'] if i['name'] == 'audio')
             self.assertEqual(links[audio_link][1:3], [gen['id'], 1])
             values = gen['widgets_values']
             self.assertEqual(values[3:5], [10.0, 22])
             self.assertEqual(values[6], 'fixed')
-            self.assertEqual(values[12], 0.0)  # lock source audio
-            self.assertEqual(values[14], '')  # optional chunk prompts
-            self.assertEqual(values[15:], [True, 0.0, 0.0])
+            if gen['type'] == 'MiniMaxH3DirectorRefAudioLipSync':
+                self.assertEqual(create['type'], 'MiniMaxH3SaveVideoExactAudio')
+                stabilized = path.stem.endswith('_stabilized')
+                strength = 0.35 if stabilized else 0.0
+                self.assertEqual(values[12:], [True, '', strength, strength, 'match'])
+                appearance_link = next(i['link'] for i in gen['inputs'] if i['name'] == 'appearance_reference')
+                if stabilized:
+                    self.assertIsNotNone(appearance_link)
+                    source = nodes[links[appearance_link][1]]
+                    self.assertEqual(source['type'], 'LoadImage')
+                    self.assertEqual(source['widgets_values'][0], 'appearance_reference.png')
+            else:
+                self.assertEqual(values[12], 0.0)  # lock source audio
+                self.assertEqual(values[14], '')  # optional chunk prompts
+                self.assertEqual(values[15:], [True, 0.0, 0.0])
 
 
 if __name__ == '__main__':

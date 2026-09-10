@@ -1,5 +1,12 @@
 # MiniMax H3 Director — 示例工作流
 
+[Ref2VA long-audio lip sync](minimax_h3_director_long_audio_lipsync_ref2va.json):
+character/background reference images, locked source speech, temporal context,
+and MKV export with exact PCM audio. [Guide](../docs/ref2va-lipsync.md).
+Use the [stabilized ref2va preset](minimax_h3_director_long_audio_lipsync_ref2va_stabilized.json)
+to enable FL2VA's color and excess-detail correction at `0.35`, with a separate
+full-scene appearance reference and corrected-tail feedback between chunks.
+
 Long audio lip sync: [base workflow](minimax_h3_director_long_audio_lipsync.json)
 or [adapted Turbo workflow](minimax_h3_director_long_audio_lipsync_turbo.json).
 Load a portrait and full audio recording; the new node loops automatically

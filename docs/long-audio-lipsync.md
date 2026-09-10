@@ -1,5 +1,8 @@
 # Long audio lip sync
 
+For the **ref2va** model with multiple character/background images and exact
+PCM audio export, see [Ref2VA lip sync](ref2va-lipsync.md).
+
 `MiniMax H3 Director Long Audio Lip Sync` generates video for the entire input
 audio automatically, using the fl2va model and the previous generated video
 tail as temporal context. It is a separate node in this Director package;

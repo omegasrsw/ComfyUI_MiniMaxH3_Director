@@ -16,6 +16,11 @@ original audio. It keeps the portrait in every chunk's vision conditioning,
 with optional color/detail stabilization fed back into the motion context.
 [Setup, timing, limits, and workflows](docs/long-audio-lipsync.md).
 
+**Ref2VA lip sync:** **MiniMax H3 Director Ref2VA Audio Lip Sync** combines up
+to nine character/background/other image references with locked source speech
+and temporal context. **Save Video (Exact Audio)** writes MKV with sample-exact
+PCM audio. [Workflow and guide](docs/ref2va-lipsync.md).
+
 **MiniMaxH3Director** is a single-node director for long-form, multi-segment MiniMax H3 audio–video generation — timeline planning, conditioning, sampling, AV decode, and export in one place. It wraps the official `MiniMaxH3ImageToVideo` / `MiniMaxH3ReferenceToVideo` + `MiniMaxH3SigmaShift` + `KSampler` pipeline with native stereo audio.
 
 ### Core capabilities

@@ -19,6 +19,7 @@ from .h3_motion_context import CONTEXT_FRAME_CHOICES, apply_motion_context
 from .core_sampling import _unpack_node_output, sample_single_stage
 from .vram_cleanup import cleanup_segment_vram
 from .appearance import AppearanceStabilizer
+from .lipsync_refs import normalize_lipsync_refs, validate_reference_image
 
 FPS = 24
 
@@ -160,13 +161,15 @@ def parse_chunk_prompts(raw, count, fallback):
     return [f"{fallback}\n{p}".strip() for p in prompts]
 
 
-def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame,
+def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=None,
                      prompt, width, height, chunk_seconds=10.0, context_frames=22,
                      seed=0, steps=25, sampler="res_multistep", scheduler="simple",
                      shift_video=12.0, shift_audio=3.0, audio_denoise=0.0,
                      clear_vram_between_chunks=True, sigmas=None, audio_noise_mask=None,
                      chunk_prompts="", reference_image_each_chunk=True,
-                     color_stabilization=0.0, detail_stabilization=0.0):
+                     color_stabilization=0.0, detail_stabilization=0.0,
+                     generation_mode="fl2va", ref_images=None, ref_image_size="match",
+                     appearance_reference=None):
     from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo
     from comfy.utils import ProgressBar
     import comfy.model_management as mm
@@ -177,13 +180,30 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame,
         raise ValueError("width and height must be positive multiples of 32.")
     if not math.isfinite(audio_denoise) or not 0 <= audio_denoise <= 1:
         raise ValueError("audio_denoise must be between 0 and 1.")
-    if (not isinstance(first_frame, torch.Tensor) or first_frame.ndim != 4
-            or first_frame.shape[0] != 1 or first_frame.shape[-1] < 3):
-        raise ValueError("first_frame must contain exactly one IMAGE.")
+    if generation_mode not in ("fl2va", "ref2va"):
+        raise ValueError("generation_mode must be fl2va or ref2va.")
+    if generation_mode == "ref2va":
+        ref_images = normalize_lipsync_refs(ref_images)
+        if audio_denoise != 0 or audio_noise_mask is not None:
+            raise ValueError("ref2va lip sync locks the input audio: audio_denoise must be 0 and audio_noise_mask disconnected.")
+        if ref_image_size not in ("match", "max"):
+            raise ValueError("ref_image_size must be match or max.")
+        if first_frame is not None:
+            raise ValueError("ref2va uses reference images, not a first-frame anchor.")
+        if appearance_reference is not None:
+            validate_reference_image(appearance_reference, "appearance_reference")
+        if (color_stabilization or detail_stabilization) and appearance_reference is None:
+            raise ValueError("Connect appearance_reference to enable ref2va color/detail stabilization; use an image of the intended full scene.")
+        appearance_image = appearance_reference
+    else:
+        validate_reference_image(first_frame, "first_frame")
+        if ref_images is not None or appearance_reference is not None:
+            raise ValueError("Use the ref2va lip-sync node for multiple reference images.")
+        appearance_image = first_frame
     chunks = plan_audio_chunks(waveform.shape[-1], rate, chunk_seconds, context_frames)
     total_frames = chunks[-1].end_frame
     prompts = parse_chunk_prompts(chunk_prompts, len(chunks), prompt)
-    appearance = AppearanceStabilizer(first_frame, width, height,
+    appearance = AppearanceStabilizer(appearance_image, width, height,
                                      color_strength=color_stabilization,
                                      detail_strength=detail_stabilization)
     if audio_noise_mask is not None:
@@ -197,14 +217,20 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame,
         with torch.inference_mode():
             for chunk, chunk_prompt in zip(chunks, prompts):
                 mm.throw_exception_if_processing_interrupted()
-                positive, latent = _unpack_node_output(MiniMaxH3ImageToVideo.execute(
-                    clip=clip, vae=video_vae, prompt=chunk_prompt, width=width, height=height,
-                    length=chunk.sample_frames,
-                    # Keep the original portrait in Qwen's visual conditioning.
-                    # apply_motion_context replaces the frame-0 latent anchor
-                    # with the moving tail but preserves these image embeddings.
-                    first_frame=first_frame if previous is None or reference_image_each_chunk else None,
-                ))
+                if generation_mode == "ref2va":
+                    from comfy_extras.nodes_minimax_h3 import MiniMaxH3ReferenceToVideo
+                    positive, latent = _unpack_node_output(MiniMaxH3ReferenceToVideo.execute(
+                        clip=clip, vae=video_vae, prompt=chunk_prompt, width=width, height=height,
+                        length=chunk.sample_frames, ref_image_size=ref_image_size, ref_images=ref_images,
+                    ))
+                else:
+                    positive, latent = _unpack_node_output(MiniMaxH3ImageToVideo.execute(
+                        clip=clip, vae=video_vae, prompt=chunk_prompt, width=width, height=height,
+                        # Keep the portrait's vision embeddings; motion context
+                        # replaces only its frame-0 latent anchor.
+                        length=chunk.sample_frames,
+                        first_frame=first_frame if previous is None or reference_image_each_chunk else None,
+                    ))
                 if previous is not None:
                     positive, trim, previous_trim = apply_motion_context(
                         positive, latent, vae=video_vae, context_length=chunk.context_frames,
@@ -260,7 +286,11 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame,
         "audio_samples": waveform.shape[-1], "audio_sample_rate": rate,
         "audio_seconds": waveform.shape[-1] / rate, "video_seconds": total_frames / FPS,
         "audio_output": "original input, unchanged", "chunks": records,
-        "reference_image_each_chunk": bool(reference_image_each_chunk),
+        "generation_mode": generation_mode,
+        "reference_image_count": len(ref_images) if ref_images else 1,
+        "ref_image_size": ref_image_size if generation_mode == "ref2va" else None,
+        "source_audio_locked": audio_denoise == 0 and audio_noise_mask is None,
+        "reference_image_each_chunk": bool(reference_image_each_chunk or generation_mode == "ref2va"),
         "color_stabilization": float(color_stabilization),
         "detail_stabilization": float(detail_stabilization),
         "context_source": "corrected decoded tail" if appearance.enabled else "sampled latent tail",

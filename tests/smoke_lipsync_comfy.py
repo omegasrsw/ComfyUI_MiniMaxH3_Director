@@ -31,12 +31,13 @@ spec.loader.exec_module(plugin)
 ls = importlib.import_module("mmx_smoke.director.lipsync")
 mc = importlib.import_module("mmx_smoke.director.h3_motion_context")
 node = plugin.NODE_CLASS_MAPPINGS['MiniMaxH3DirectorLongAudioLipSync']
+ref_node = plugin.NODE_CLASS_MAPPINGS['MiniMaxH3DirectorRefAudioLipSync']
 assert node.INPUT_TYPES()['required']['audio'] == ('AUDIO',)
 for path in (root / 'example_workflows').glob('*long_audio_lipsync*.json'):
     graph = json.loads(path.read_text(encoding='utf-8'))
-    gen = next(n for n in graph['nodes'] if n['type'] == 'MiniMaxH3DirectorLongAudioLipSync')
+    gen = next(n for n in graph['nodes'] if n['type'] in ('MiniMaxH3DirectorLongAudioLipSync', 'MiniMaxH3DirectorRefAudioLipSync'))
     values = iter(gen['widgets_values'])
-    schema = node.INPUT_TYPES()
+    schema = plugin.NODE_CLASS_MAPPINGS[gen['type']].INPUT_TYPES()
     for name, spec in {**schema['required'], **schema['optional']}.items():
         typ = spec[0]
         if isinstance(typ, list) or typ in ('INT', 'FLOAT', 'STRING', 'BOOLEAN'):
@@ -57,8 +58,12 @@ for path in (root / 'example_workflows').glob('*long_audio_lipsync*.json'):
 
 
 class Clip:
-    def tokenize(self, text, images):
-        assert len(images) == 1  # original portrait remains present in every chunk
+    def tokenize(self, text, images=None, minimax_ref_items=None):
+        if minimax_ref_items is not None:
+            assert len(minimax_ref_items) == 2
+            assert all(r['type'] == 'image' for r in minimax_ref_items)
+        else:
+            assert len(images) == 1  # original portrait remains present in every chunk
         return text
 
     def encode_from_tokens_scheduled(self, tokens):
@@ -86,6 +91,7 @@ if audio_weights:
     audio_vae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(audio_weights, safe_load=True))
 
 calls = []
+mode = 'fl2va'
 
 
 def sample(**kwargs):
@@ -95,13 +101,30 @@ def sample(**kwargs):
     assert torch.isfinite(audio).all()
     positive = kwargs['positive'][0][1]
     keyframes = positive.get('minimax_keyframes', [])
+    refs = positive.get('minimax_refs', [])
+    assert len(refs) == (2 if mode == 'ref2va' else 0)
+    assert all(r['kind'] == 'image' for r in refs)
     layout = mm.PackedLayout(7, video.shape[2], video.shape[3], video.shape[4], audio.shape[-1],
-                             keyframes=keyframes)
+                             keyframes=keyframes, refs=refs)
     if calls:
         assert len(keyframes) == mc.steps_for_frames(22)
         positions = [float(layout.position_ids[a, 0]) for a, b, kind in layout.segments if kind == 'cond']
         assert all(a < b for a, b in zip(positions, positions[1:]))
-        assert 'minimax_refs' not in positive  # no generated soundtrack substituted for source
+        # Context time must shift with reference blocks, and both must reach
+        # the real H3 payload without either list overwriting the other.
+        origin = float(layout.position_ids[layout.segments[-1][0], 0])
+        for position, keyframe in zip(positions, keyframes):
+            assert abs(position - origin - mm.FRAME_RESCALE * keyframe['director_context_index']) < 1e-8
+        import comfy.model_base
+        shell = comfy.model_base.MiniMaxH3.__new__(comfy.model_base.MiniMaxH3)
+        torch.nn.Module.__init__(shell)
+        shell.latent_shapes = None
+        with patch.object(comfy.model_base.BaseModel, 'extra_conds', return_value={}):
+            payload = shell.extra_conds(**positive)['minimax_payload'].cond
+        expected = [kf['latent'] for kf in keyframes] + [r['latent'] for r in refs]
+        assert len(payload['cond_video_latents']) == len(expected)
+        assert all(a is b for a, b in zip(payload['cond_video_latents'], expected))
+        assert not payload.get('cond_audio_latents')  # source audio is in the locked target latent
     calls.append((video.shape, audio.shape))
     return kwargs['latent']
 
@@ -117,4 +140,23 @@ with patch.object(ls, 'sample_single_stage', side_effect=sample):
 assert count == 289 and len(images) == 289 and fps == 24
 assert output_audio is audio and len(calls) == 3
 print(json.dumps({'status': 'passed', 'chunks': len(calls), 'frames': count,
-                  'real_audio_vae': bool(audio_weights), 'latent_shapes': calls}))
+                  'mode': mode, 'real_audio_vae': bool(audio_weights), 'latent_shapes': calls}))
+calls.clear()
+mode = 'ref2va'
+before = audio['waveform'].clone()
+with patch.object(ls, 'sample_single_stage', side_effect=sample):
+    images, output_audio, fps, count, report = ref_node().execute(
+        model=None, clip=Clip(), video_vae=VideoVAE(), audio_vae=audio_vae, audio=audio,
+        ref_image_1=torch.zeros(1, 32, 32, 3), ref_image_2=torch.ones(1, 32, 32, 3),
+        prompt='The character in <Picture 1> in the background from <Picture 2>.',
+        width=32, height=32, chunk_seconds=5.17, clear_vram_between_chunks=False,
+        appearance_reference=torch.full((1, 32, 32, 3), 0.3),
+        color_stabilization=0.35, detail_stabilization=0.35,
+    )
+assert count == len(images) == 289 and fps == 24 and len(calls) == 3
+assert output_audio is audio and torch.equal(output_audio['waveform'], before)
+assert json.loads(report)['source_audio_locked']
+assert json.loads(report)['context_source'] == 'corrected decoded tail'
+print(json.dumps({'status': 'passed', 'mode': mode, 'chunks': len(calls), 'frames': count,
+                  'real_audio_vae': bool(audio_weights), 'audio_unchanged': True,
+                  'context_source': json.loads(report)['context_source']}))

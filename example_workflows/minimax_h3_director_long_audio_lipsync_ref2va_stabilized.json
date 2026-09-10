@@ -1,0 +1,693 @@
+{
+  "last_node_id": 13,
+  "last_link_id": 13,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        350,
+        160
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "h3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "default"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "CLIPLoader",
+      "pos": [
+        0,
+        210
+      ],
+      "size": [
+        350,
+        160
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            4
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "h3\\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "minimax",
+        "default"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "VAELoader",
+      "pos": [
+        0,
+        420
+      ],
+      "size": [
+        350,
+        160
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "h3\\minimax_h3_video_vae_fp16.safetensors"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "VAELoader",
+      "pos": [
+        0,
+        610
+      ],
+      "size": [
+        350,
+        160
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "h3\\minimax_h3_audio_vae_fp32.safetensors"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "LoadImage",
+      "pos": [
+        410,
+        0
+      ],
+      "size": [
+        330,
+        310
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            6
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "character.png",
+        "image"
+      ],
+      "title": "<Picture 1> Character"
+    },
+    {
+      "id": 6,
+      "type": "LoadImage",
+      "pos": [
+        410,
+        380
+      ],
+      "size": [
+        330,
+        310
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            7
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "background.png",
+        "image"
+      ],
+      "title": "<Picture 2> Background"
+    },
+    {
+      "id": 7,
+      "type": "LoadAudio",
+      "pos": [
+        0,
+        820
+      ],
+      "size": [
+        350,
+        160
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "speech.wav"
+      ],
+      "title": "Full original speech audio"
+    },
+    {
+      "id": 8,
+      "type": "MiniMaxH3DirectorRefAudioLipSync",
+      "pos": [
+        810,
+        0
+      ],
+      "size": [
+        490,
+        970
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "name": "video_vae",
+          "type": "VAE",
+          "link": 2
+        },
+        {
+          "name": "audio_vae",
+          "type": "VAE",
+          "link": 3
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 4
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 5
+        },
+        {
+          "name": "ref_image_1",
+          "type": "IMAGE",
+          "link": 6
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "ref_image_2",
+          "type": "IMAGE",
+          "link": 7,
+          "shape": 7
+        },
+        {
+          "name": "ref_image_3",
+          "type": "IMAGE",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "ref_image_4",
+          "type": "IMAGE",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "ref_image_5",
+          "type": "IMAGE",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "ref_image_6",
+          "type": "IMAGE",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "ref_image_7",
+          "type": "IMAGE",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "ref_image_8",
+          "type": "IMAGE",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "ref_image_9",
+          "type": "IMAGE",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "appearance_reference",
+          "type": "IMAGE",
+          "link": 13,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            8
+          ]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            9
+          ]
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": [
+            10
+          ]
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            11
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MiniMaxH3DirectorRefAudioLipSync"
+      },
+      "widgets_values": [
+        "The character from <Picture 1> is in the setting shown in <Picture 2>, speaking to camera with accurate lip sync to the supplied speech. Preserve the character identity, clothing, background and lighting throughout. Natural expressions and subtle gestures, static camera, no cuts.",
+        864,
+        480,
+        10,
+        22,
+        43796368878152,
+        "fixed",
+        25,
+        "res_multistep",
+        "beta",
+        12.0,
+        3.0,
+        true,
+        "",
+        0.35,
+        0.35,
+        "match"
+      ],
+      "title": "Ref2VA lip sync + color/detail stabilization"
+    },
+    {
+      "id": 9,
+      "type": "MiniMaxH3SaveVideoExactAudio",
+      "pos": [
+        1400,
+        0
+      ],
+      "size": [
+        420,
+        210
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 8
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 9
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "link": 10,
+          "widget": {
+            "name": "fps"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "file_path",
+          "type": "STRING",
+          "links": [
+            12
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MiniMaxH3SaveVideoExactAudio"
+      },
+      "widgets_values": [
+        24,
+        "video/MiniMaxH3_Ref2VA_ExactAudio"
+      ]
+    },
+    {
+      "id": 10,
+      "type": "PreviewAny",
+      "pos": [
+        1400,
+        300
+      ],
+      "size": [
+        450,
+        450
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 11
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "title": "Chunk timing and source-audio report"
+    },
+    {
+      "id": 11,
+      "type": "PreviewAny",
+      "pos": [
+        1400,
+        800
+      ],
+      "size": [
+        450,
+        140
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 12
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "title": "Saved MKV file path"
+    },
+    {
+      "id": 12,
+      "type": "MarkdownNote",
+      "pos": [
+        0,
+        1130
+      ],
+      "size": [
+        1220,
+        340
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "MarkdownNote"
+      },
+      "widgets_values": [
+        "Stabilized ref2va preset: upload character.png, background.png, speech.wav and appearance_reference.png. Use a clean image of the intended complete scene as appearance_reference, with comparable framing and lighting. It sets color and fine-detail statistics; it is not an extra Picture reference or a fixed opening frame. color_stabilization=0.35 and detail_stabilization=0.35 are starting values. Every chunk retains all image references. Generated visible frames receive bounded color/contrast correction and attenuation of excess fine texture, with correction smoothed across chunk boundaries. The corrected tail is re-encoded as motion context for the next chunk to counter accumulating drift. Reduce detail_stabilization if too soft; reduce color_stabilization if the grade is too strong. These filters cannot reconstruct lost detail or guarantee identity. Source audio remains locked and unchanged; the Exact Audio MKV saver preserves decoded input samples, channels and sample rate. Use a desktop player supporting MKV/PCM. See docs/ref2va-lipsync.md."
+      ],
+      "title": "Ref2VA lip sync with exact source audio"
+    },
+    {
+      "id": 13,
+      "type": "LoadImage",
+      "pos": [
+        410,
+        760
+      ],
+      "size": [
+        330,
+        310
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            13
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "appearance_reference.png",
+        "image"
+      ],
+      "title": "Appearance target: intended FULL scene"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      8,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      3,
+      0,
+      8,
+      1,
+      "VAE"
+    ],
+    [
+      3,
+      4,
+      0,
+      8,
+      2,
+      "VAE"
+    ],
+    [
+      4,
+      2,
+      0,
+      8,
+      3,
+      "CLIP"
+    ],
+    [
+      5,
+      7,
+      0,
+      8,
+      4,
+      "AUDIO"
+    ],
+    [
+      6,
+      5,
+      0,
+      8,
+      5,
+      "IMAGE"
+    ],
+    [
+      7,
+      6,
+      0,
+      8,
+      7,
+      "IMAGE"
+    ],
+    [
+      8,
+      8,
+      0,
+      9,
+      0,
+      "IMAGE"
+    ],
+    [
+      9,
+      8,
+      1,
+      9,
+      1,
+      "AUDIO"
+    ],
+    [
+      10,
+      8,
+      2,
+      9,
+      2,
+      "FLOAT"
+    ],
+    [
+      11,
+      8,
+      4,
+      10,
+      0,
+      "STRING"
+    ],
+    [
+      12,
+      9,
+      0,
+      11,
+      0,
+      "STRING"
+    ],
+    [
+      13,
+      13,
+      0,
+      8,
+      15,
+      "IMAGE"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7,
+      "offset": [
+        50,
+        50
+      ]
+    }
+  },
+  "version": 0.4
+}
