@@ -110,6 +110,65 @@ The `report` output includes every sampled/exported interval, per-chunk seed
 before model inference. Transcript alignment remains the responsibility of
 the upstream transcription/prompt workflow.
 
+## Appearance drift over successive chunks
+
+`reference_image_each_chunk` now defaults to **true**. Previously only the
+first chunk sent the portrait into the text/vision encoder; later chunks
+inherited appearance solely through the generated video tail. Each new
+generation could therefore reinforce color, contrast, texture, and identity
+errors from its predecessor.
+
+With this option on, the original portrait is supplied to the text/vision
+encoder every time. Its first-frame latent anchor is replaced by the moving
+context tail, while its visual embeddings remain in the conditioning. The
+portrait guides appearance and the tail guides motion. This is a semantic
+appearance reference, not a pixel-perfect identity lock. Turn the option off
+and leave the two stabilization sliders at zero to reproduce the old path.
+
+Two optional filters provide additional control for static talking shots:
+
+| Setting | Initial trial value | Effect |
+|---|---|---|
+| `reference_image_each_chunk` | true | Original portrait in every chunk's vision conditioning |
+| `color_stabilization` | 0.35 | Bounded RGB mean/contrast correction toward the input image |
+| `detail_stabilization` | 0.35 | Attenuates excess fine texture relative to the input image |
+
+Both sliders default to **0 (off)** so existing workflows do not silently
+receive color grading or softening. Color correction limits per-channel gain
+to 0.85–1.15 and offset to ±0.08 before applying the slider strength. Detail
+correction attenuates a 3×3 high-pass band by at most 50% at full strength;
+it never amplifies that band. This can reduce harsh skin/hair texture, but
+does not reconstruct lost detail or restore facial geometry.
+
+Correction parameters are smoothed over roughly half a second and carried
+across chunk boundaries. Only visible frames are filtered. When a slider is
+nonzero, the corrected output's final context frames are re-encoded for the
+next chunk, so the model receives the corrected appearance too. This adds one
+short video-VAE encode per handoff and uses the same context length and
+audio clock. The original audio remains unchanged. With both sliders off,
+the direct latent-tail path is retained.
+
+These global appearance statistics suit stable lighting and composition.
+They can suppress intentional lighting/color changes or soften legitimate
+detail after camera motion; reduce or disable the sliders for such shots.
+They also cannot undo a change in facial proportions or framing. Try the
+portrait reference alone first, then add moderate correction if needed.
+
+Check the portrait preprocessing as well. In the supplied 25-second example,
+the workflow enlarged the portrait 4× with RTX VSR, then resized it with
+`nearest-exact`, and stretched its 735×860 aspect ratio to a 1024×1024 square.
+That pipeline can introduce hard edges and changes the portrait's geometry
+before H3 sees it. For a useful comparison, bypass the 4× enhancement and use
+a single Lanczos/bilinear resize; choose an output aspect close to the original
+(for example 768×896), or crop deliberately rather than stretch.
+
+If drift persists, compare the core-only base-model workflow with the Turbo
+workflow on the same short excerpt. The example uses Turbo strength 1 with
+8 steps; this does not establish whether Turbo causes the observed drift.
+Do not assume that increasing steps on a distilled model will improve it.
+Visual quality from the new conditioning still needs an actual multi-chunk
+diffusion render; the automated smoke test checks wiring and timing only.
+
 ## Memory and limits
 
 Sampling VRAM is bounded by one chunk plus its context. The final `IMAGE`

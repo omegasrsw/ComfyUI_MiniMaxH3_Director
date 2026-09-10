@@ -40,6 +40,12 @@ class MiniMaxH3DirectorLongAudioLipSync:
                 "audio_noise_mask": ("MASK", {"tooltip": "Overrides audio_denoise; 1 frame or ceil(audio seconds * 24) frames. Spatial maximum becomes audio-time strength."}),
                 "chunk_prompts": ("STRING", {"multiline": True, "default": "",
                     "tooltip": "Optional JSON array, one prompt suffix per chunk. Include overlap speech in each suffix; see docs/long-audio-lipsync.md."}),
+                "reference_image_each_chunk": ("BOOLEAN", {"default": True,
+                    "tooltip": "Keep the original portrait in the text/vision conditioning of every chunk. Motion still comes from the previous tail."}),
+                "color_stabilization": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Optional bounded color/contrast matching to the input image. Try 0.35 for a static talking shot. Corrected tail is re-encoded as context."}),
+                "detail_stabilization": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Optional attenuation of excess fine texture relative to the input. Try 0.35. Can soften detail; does not restore identity."}),
             },
         }
 

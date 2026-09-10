@@ -58,6 +58,7 @@ for path in (root / 'example_workflows').glob('*long_audio_lipsync*.json'):
 
 class Clip:
     def tokenize(self, text, images):
+        assert len(images) == 1  # original portrait remains present in every chunk
         return text
 
     def encode_from_tokens_scheduled(self, tokens):
@@ -111,6 +112,7 @@ with patch.object(ls, 'sample_single_stage', side_effect=sample):
         model=None, clip=Clip(), video_vae=VideoVAE(), audio_vae=audio_vae, audio=audio,
         first_frame=torch.zeros(1, 32, 32, 3), prompt='A person speaking.', width=32, height=32,
         chunk_seconds=5.17, clear_vram_between_chunks=False,
+        color_stabilization=0.35, detail_stabilization=0.35,
     )
 assert count == 289 and len(images) == 289 and fps == 24
 assert output_audio is audio and len(calls) == 3

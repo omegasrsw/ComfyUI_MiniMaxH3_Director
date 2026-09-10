@@ -18,6 +18,7 @@ from .frame_align import minimax_align_frame_count
 from .h3_motion_context import CONTEXT_FRAME_CHOICES, apply_motion_context
 from .core_sampling import _unpack_node_output, sample_single_stage
 from .vram_cleanup import cleanup_segment_vram
+from .appearance import AppearanceStabilizer
 
 FPS = 24
 
@@ -164,7 +165,8 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame,
                      seed=0, steps=25, sampler="res_multistep", scheduler="simple",
                      shift_video=12.0, shift_audio=3.0, audio_denoise=0.0,
                      clear_vram_between_chunks=True, sigmas=None, audio_noise_mask=None,
-                     chunk_prompts=""):
+                     chunk_prompts="", reference_image_each_chunk=True,
+                     color_stabilization=0.0, detail_stabilization=0.0):
     from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo
     from comfy.utils import ProgressBar
     import comfy.model_management as mm
@@ -181,6 +183,9 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame,
     chunks = plan_audio_chunks(waveform.shape[-1], rate, chunk_seconds, context_frames)
     total_frames = chunks[-1].end_frame
     prompts = parse_chunk_prompts(chunk_prompts, len(chunks), prompt)
+    appearance = AppearanceStabilizer(first_frame, width, height,
+                                     color_strength=color_stabilization,
+                                     detail_strength=detail_stabilization)
     if audio_noise_mask is not None:
         # Validate before loading the expensive text encoder / diffusion model.
         audio_mask_for_chunk(audio_noise_mask, chunks[0], torch.zeros(1, 32, 2, 1), total_frames, audio_denoise)
@@ -194,7 +199,11 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame,
                 mm.throw_exception_if_processing_interrupted()
                 positive, latent = _unpack_node_output(MiniMaxH3ImageToVideo.execute(
                     clip=clip, vae=video_vae, prompt=chunk_prompt, width=width, height=height,
-                    length=chunk.sample_frames, first_frame=first_frame if previous is None else None,
+                    length=chunk.sample_frames,
+                    # Keep the original portrait in Qwen's visual conditioning.
+                    # apply_motion_context replaces the frame-0 latent anchor
+                    # with the moving tail but preserves these image embeddings.
+                    first_frame=first_frame if previous is None or reference_image_each_chunk else None,
                 ))
                 if previous is not None:
                     positive, trim, previous_trim = apply_motion_context(
@@ -216,6 +225,7 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame,
                 if decoded.shape[0] < stop:
                     raise RuntimeError(f"Chunk {chunk.index + 1} decoded {decoded.shape[0]} frames; need {stop}.")
                 visible = decoded[chunk.context_frames:stop].detach().cpu().float()
+                visible = appearance.process(visible)
                 if output is None:
                     # One final allocation instead of retaining every chunk and
                     # torch.cat doubling peak RAM. IMAGE output still scales with duration.
@@ -227,7 +237,17 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame,
                 from .h3_motion_context import steps_for_frames
                 tail_steps = steps_for_frames(context_frames)
                 video = sampled["samples"].unbind()[0]
-                previous = {"samples": NestedTensor((video[:, :, -tail_steps:].detach().cpu().clone(),))}
+                if appearance.enabled and chunk.index + 1 < len(chunks):
+                    # Feed corrected appearance back into the next generation.
+                    # Prefix frames have already been removed; never filter or
+                    # re-export the overlap twice. Re-encode only this short tail.
+                    tail = video_vae.encode(visible[-context_frames:])
+                    if tail.ndim != 5 or tail.shape[2] != tail_steps or tail.shape[3:] != video.shape[3:]:
+                        raise RuntimeError("Corrected appearance tail does not match the H3 context grid.")
+                    previous = {"samples": NestedTensor((tail.detach().cpu().clone(),))}
+                    del tail
+                else:
+                    previous = {"samples": NestedTensor((video[:, :, -tail_steps:].detach().cpu().clone(),))}
                 records.append({**asdict(chunk), "audio_start_frame": chunk.audio_start_frame,
                                 "seed": chunk_seed, "prompt": chunk_prompt})
                 progress.update_absolute(chunk.index + 1)
@@ -240,5 +260,9 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame,
         "audio_samples": waveform.shape[-1], "audio_sample_rate": rate,
         "audio_seconds": waveform.shape[-1] / rate, "video_seconds": total_frames / FPS,
         "audio_output": "original input, unchanged", "chunks": records,
+        "reference_image_each_chunk": bool(reference_image_each_chunk),
+        "color_stabilization": float(color_stabilization),
+        "detail_stabilization": float(detail_stabilization),
+        "context_source": "corrected decoded tail" if appearance.enabled else "sampled latent tail",
     }, indent=2, ensure_ascii=False)
     return output, audio, float(FPS), total_frames, report

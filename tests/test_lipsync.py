@@ -105,10 +105,11 @@ class ExecutionTests(unittest.TestCase):
         self.encoded_audio = []
         self.contexts = []
         self.cleanups = []
+        self.reference_each_chunk = True
 
         def conditioning(**kwargs):
             n = kwargs['length']
-            self.assertEqual(kwargs['first_frame'] is None, len(self.samples) > 0)
+            self.assertEqual(kwargs['first_frame'] is None, len(self.samples) > 0 and not self.reference_each_chunk)
             return ['positive'], {'samples': Nested((torch.zeros(1, 24, mc.steps_for_frames(n), 2, 2),
                                                    torch.zeros(1, 32, 2, round(n / 24 * 40))))}
 
@@ -162,7 +163,8 @@ class ExecutionTests(unittest.TestCase):
 
     def run_generation(self, samples=32000 * 27 + 7, **kwargs):
         self.audio = {'waveform': torch.ones(1, 1, samples), 'sample_rate': 32000}
-        return ls.generate_lipsync(model=None, clip=None, video_vae=None, audio_vae=None,
+        video_vae = kwargs.pop('video_vae', None)
+        return ls.generate_lipsync(model=None, clip=None, video_vae=video_vae, audio_vae=None,
             audio=self.audio, first_frame=torch.ones(1, 32, 32, 3), prompt='speech', width=32, height=32,
             seed=2**64-1, **kwargs)
 
@@ -186,6 +188,27 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(images.shape[0], 1)
         self.assertEqual(len(self.contexts), 0)
         self.assertEqual(json.loads(report)['chunks'][0]['sample_frames'], 124)
+
+    def test_legacy_reference_toggle(self):
+        self.reference_each_chunk = False
+        _, _, _, _, report = self.run_generation(reference_image_each_chunk=False)
+        self.assertFalse(json.loads(report)['reference_image_each_chunk'])
+
+    def test_corrected_context_matches_exported_tail(self):
+        tails = []
+        def encode(frames):
+            tails.append(frames.clone())
+            return torch.ones(1, 24, mc.steps_for_frames(len(frames)), 2, 2)
+        images, audio, fps, count, report = self.run_generation(
+            video_vae=types.SimpleNamespace(encode=encode), color_stabilization=0.35,
+            detail_stabilization=0.35)
+        chunks = json.loads(report)['chunks']
+        self.assertEqual(len(tails), len(chunks) - 1)
+        self.assertEqual(count, 649)
+        self.assertIs(audio, self.audio)
+        for tail, chunk in zip(tails, chunks):
+            torch.testing.assert_close(tail, images[chunk['end_frame']-22:chunk['end_frame']])
+        self.assertEqual(json.loads(report)['context_source'], 'corrected decoded tail')
 
     def test_audio_vae_rounding_and_wrong_grid(self):
         encoder = sys.modules['comfy_extras.nodes_audio'].VAEEncodeAudio
@@ -240,7 +263,8 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(values[3:5], [10.0, 22])
             self.assertEqual(values[6], 'fixed')
             self.assertEqual(values[12], 0.0)  # lock source audio
-            self.assertEqual(values[-1], '')  # optional chunk prompts
+            self.assertEqual(values[14], '')  # optional chunk prompts
+            self.assertEqual(values[15:], [True, 0.0, 0.0])
 
 
 if __name__ == '__main__':
