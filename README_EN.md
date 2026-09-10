@@ -1,9 +1,11 @@
 # ComfyUI MiniMax H3 Director
 
+**Long-audio lip sync: [complete FL2VA/ref2va setup, parameter reference, stabilization and exact-audio guide](README.md).**
+
 Multi-segment AV timeline director for **official ComfyUI MiniMax-H3**.  
 Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director)
 
-**中文文档** → [README.md](README.md)
+**中文文档** → [README_ZH.md](README_ZH.md)
 
 ![MiniMaxH3Director workflow screenshot](docs/screenshot.png)
 
