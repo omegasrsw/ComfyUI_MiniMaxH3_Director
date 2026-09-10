@@ -9,6 +9,11 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 
 ## Features
 
+**Long audio lip sync:** the new **MiniMax H3 Director Long Audio Lip Sync**
+node accepts a portrait and full speech recording, generates overlapping H3
+chunks with previous-video context, and returns the complete video with the
+original audio. [Setup, timing, limits, and workflows](docs/long-audio-lipsync.md).
+
 **MiniMaxH3Director** is a single-node director for long-form, multi-segment MiniMax H3 audio–video generation — timeline planning, conditioning, sampling, AV decode, and export in one place. It wraps the official `MiniMaxH3ImageToVideo` / `MiniMaxH3ReferenceToVideo` + `MiniMaxH3SigmaShift` + `KSampler` pipeline with native stereo audio.
 
 ### Core capabilities

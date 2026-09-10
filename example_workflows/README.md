@@ -1,5 +1,11 @@
 # MiniMax H3 Director — 示例工作流
 
+Long audio lip sync: [base workflow](minimax_h3_director_long_audio_lipsync.json)
+or [adapted Turbo workflow](minimax_h3_director_long_audio_lipsync_turbo.json).
+Load a portrait and full audio recording; the new node loops automatically
+with video context and preserves the original soundtrack.
+[Setup and timing details](../docs/long-audio-lipsync.md).
+
 拖入 ComfyUI 画布即可使用。需已安装本插件，且 ComfyUI 主干含 MiniMax H3（v0.30.0+）。
 
 | 文件 | 任务 | UNET | 说明 |

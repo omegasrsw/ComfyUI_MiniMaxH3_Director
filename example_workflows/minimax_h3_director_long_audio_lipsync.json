@@ -1,0 +1,558 @@
+{
+  "last_node_id": 11,
+  "last_link_id": 11,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [
+        0,
+        0
+      ],
+      "size": [
+        330,
+        150
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "h3\\minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "default"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "CLIPLoader",
+      "pos": [
+        0,
+        210
+      ],
+      "size": [
+        330,
+        150
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            4
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "h3\\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "minimax",
+        "default"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "VAELoader",
+      "pos": [
+        0,
+        420
+      ],
+      "size": [
+        330,
+        150
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "h3\\minimax_h3_video_vae_fp16.safetensors"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "VAELoader",
+      "pos": [
+        0,
+        610
+      ],
+      "size": [
+        330,
+        150
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "h3\\minimax_h3_audio_vae_fp32.safetensors"
+      ]
+    },
+    {
+      "id": 5,
+      "type": "LoadImage",
+      "pos": [
+        400,
+        0
+      ],
+      "size": [
+        330,
+        320
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            6
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "ComfyUI_temp_yxgpp_00001_.png",
+        "image"
+      ]
+    },
+    {
+      "id": 6,
+      "type": "LoadAudio",
+      "pos": [
+        400,
+        380
+      ],
+      "size": [
+        330,
+        190
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "ComfyUI_00031.mp3"
+      ]
+    },
+    {
+      "id": 7,
+      "type": "MiniMaxH3DirectorLongAudioLipSync",
+      "pos": [
+        800,
+        0
+      ],
+      "size": [
+        460,
+        740
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        },
+        {
+          "name": "video_vae",
+          "type": "VAE",
+          "link": 2
+        },
+        {
+          "name": "audio_vae",
+          "type": "VAE",
+          "link": 3
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 4
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 5
+        },
+        {
+          "name": "first_frame",
+          "type": "IMAGE",
+          "link": 6
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "audio_noise_mask",
+          "type": "MASK",
+          "link": null,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            7
+          ]
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            8
+          ]
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": [
+            9
+          ]
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            11
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MiniMaxH3DirectorLongAudioLipSync"
+      },
+      "widgets_values": [
+        "A continuous shot of the person speaking to camera, with accurate lip sync to the supplied speech, natural facial expressions and subtle gestures. Preserve appearance, lighting and framing. Static camera, no cuts.",
+        864,
+        480,
+        10.0,
+        22,
+        43796368878152,
+        "fixed",
+        25,
+        "res_multistep",
+        "simple",
+        12.0,
+        3.0,
+        0.0,
+        true,
+        ""
+      ]
+    },
+    {
+      "id": 8,
+      "type": "CreateVideo",
+      "pos": [
+        1330,
+        0
+      ],
+      "size": [
+        330,
+        150
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 7
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 8
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "link": 9,
+          "widget": {
+            "name": "fps"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [
+            10
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CreateVideo"
+      },
+      "widgets_values": [
+        24,
+        "auto",
+        "sRGB"
+      ]
+    },
+    {
+      "id": 9,
+      "type": "SaveVideo",
+      "pos": [
+        1730,
+        0
+      ],
+      "size": [
+        420,
+        350
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SaveVideo"
+      },
+      "widgets_values": [
+        "video/MiniMaxH3_LongAudio",
+        "auto",
+        "auto"
+      ]
+    },
+    {
+      "id": 10,
+      "type": "PreviewAny",
+      "pos": [
+        1330,
+        240
+      ],
+      "size": [
+        330,
+        340
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 11
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "title": "Chunk timing report"
+    },
+    {
+      "id": 11,
+      "type": "MarkdownNote",
+      "pos": [
+        0,
+        1030
+      ],
+      "size": [
+        1150,
+        230
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "MarkdownNote"
+      },
+      "widgets_values": [
+        "Load your portrait and the FULL speech audio. Select model files if your paths differ. The node loops automatically through the audio at 24 fps. Context = 22; chunk_seconds includes overlap and snaps down to the H3 grid. Output audio is the original file. audio_denoise = 0 locks the source audio during sampling. Use a visual/speaking prompt; do not repeat the entire long transcript in every chunk. Optional chunk_prompts is a JSON array of per-window prompt suffixes, including overlap speech. See docs/long-audio-lipsync.md. Final IMAGE output uses CPU RAM proportional to duration. This variant needs only ComfyUI core and this Director plugin. It uses the base model with 25 steps, res_multistep/simple. "
+      ],
+      "title": "Long audio lip sync - setup"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      7,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      3,
+      0,
+      7,
+      1,
+      "VAE"
+    ],
+    [
+      3,
+      4,
+      0,
+      7,
+      2,
+      "VAE"
+    ],
+    [
+      4,
+      2,
+      0,
+      7,
+      3,
+      "CLIP"
+    ],
+    [
+      5,
+      6,
+      0,
+      7,
+      4,
+      "AUDIO"
+    ],
+    [
+      6,
+      5,
+      0,
+      7,
+      5,
+      "IMAGE"
+    ],
+    [
+      7,
+      7,
+      0,
+      8,
+      0,
+      "IMAGE"
+    ],
+    [
+      8,
+      7,
+      1,
+      8,
+      1,
+      "AUDIO"
+    ],
+    [
+      9,
+      7,
+      2,
+      8,
+      2,
+      "FLOAT"
+    ],
+    [
+      10,
+      8,
+      0,
+      9,
+      0,
+      "VIDEO"
+    ],
+    [
+      11,
+      7,
+      4,
+      10,
+      0,
+      "STRING"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.7,
+      "offset": [
+        50,
+        50
+      ]
+    }
+  },
+  "version": 0.4
+}

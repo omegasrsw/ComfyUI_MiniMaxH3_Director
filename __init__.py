@@ -9,6 +9,7 @@ from .nodes.conditioning import (
     MiniMaxH3DirectorPlannerConditioning,
 )
 from .nodes.director import MiniMaxH3Director
+from .nodes.director_lipsync import MiniMaxH3DirectorLongAudioLipSync
 from .nodes.director_refine import MiniMaxH3DirectorRefine
 from .nodes.director_groups import (
     MiniMaxH3DirectorGroupImageToVideo,
@@ -17,6 +18,7 @@ from .nodes.director_groups import (
 )
 
 NODE_CLASS_MAPPINGS = {
+    "MiniMaxH3DirectorLongAudioLipSync": MiniMaxH3DirectorLongAudioLipSync,
     "MiniMaxH3Director": MiniMaxH3Director,
     "MiniMaxH3DirectorRefine": MiniMaxH3DirectorRefine,
     # Legacy type id kept so older workflows still load.
@@ -31,6 +33,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "MiniMaxH3DirectorLongAudioLipSync": "MiniMax H3 Director Long Audio Lip Sync",
     "MiniMaxH3Director": "MiniMaxH3Director",
     "MiniMaxH3DirectorRefine": "MiniMax H3 Director Refine",
     "ComfyMiniMaxH3Director": "MiniMaxH3Director",
