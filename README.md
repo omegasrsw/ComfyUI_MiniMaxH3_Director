@@ -14,6 +14,7 @@ This fork adds audio-driven generation to the original MiniMax H3 Director. Its 
 - [Ref2VA walkthrough](#ref2va-walkthrough)
 - [Suggested starting presets](#suggested-starting-presets)
 - [Complete node parameter guide](#complete-node-parameter-guide)
+- [Whole-video latent outputs for upscaling](#whole-video-latent-outputs-for-upscaling)
 - [Color and sharpness stabilization](#color-and-sharpness-stabilization)
 - [Preserving the exact input audio](#preserving-the-exact-input-audio)
 - [How chunk timing and context work](#how-chunk-timing-and-context-work)
@@ -145,7 +146,7 @@ The Turbo preset is adapted from the supplied FL2VA workflow. Do not assume its 
 | `scheduler` | Choice; FL2VA `simple`, ref2va `beta` | Keep model-specific default | Noise schedule. Turbo example uses `beta`. Connected `sigmas` overrides this schedule. |
 | `shift_video` | FLOAT; `12`; 0.01–100 | **Advanced:** keep `12` | H3 video sigma shift; not an audio/video timing offset. |
 | `shift_audio` | FLOAT; `3`; 0.01–100 | **Advanced:** keep `3` | H3 audio sigma shift; not a volume, voice, or audio delay control. |
-| `clear_vram_between_chunks` | BOOLEAN; `true` | `true` initially | Runs model-unloading/cleanup between chunks. `false` can avoid reload overhead when models fit. Does not free the accumulated output frames in CPU RAM. |
+| `clear_vram_between_chunks` | BOOLEAN; `true` | `true` initially | Unloads models before each video VAE decode and between chunks. `false` can avoid reload overhead when models fit. Does not free the accumulated output frames in CPU RAM. |
 
 ### Shared optional controls — both models
 
@@ -153,6 +154,7 @@ The Turbo preset is adapted from the supplied FL2VA workflow. Do not assume its 
 |---|---|---|---|
 | `color_stabilization` | FLOAT; `0`; 0–1, step 0.05 | `0` baseline; try `0.35` for static-shot drift | Bounded matching of RGB color/contrast toward the appearance target. Lower if grading is too strong or lighting should change. |
 | `detail_stabilization` | FLOAT; `0`; 0–1, step 0.05 | `0` baseline; try `0.35` for oversharpening | Reduces excess fine texture relative to the appearance target. Lower if skin/hair becomes too soft. This is not a sharpening or detail-restoration strength. |
+| `first_frame_anchor_strength` | FLOAT; `0`; 0–1, step 0.05 | **Experimental:** compare `1` against `0` with a fixed seed | Restores the original scene latent as the oldest hidden context keyframe in continuation chunks. `1` uses the full original anchor; intermediate values interpolate it with the old context latent. Remaining context keeps recent motion. Can pull pose/framing toward the original. Ref2va requires `appearance_reference`. |
 | `sigmas` | SIGMAS; disconnected | **Advanced:** leave disconnected | Explicit schedule overrides `steps` and `scheduler`. Construct it using the same H3 shifts as the sampler's model. |
 | `chunk_prompts` | STRING; empty | **Advanced:** leave empty | JSON array of prompt suffixes, exactly one string per planned chunk. The global prompt is prepended to every suffix. Count errors fail before sampling. |
 
@@ -176,7 +178,7 @@ Leaving the mask disconnected locks audio only when `audio_denoise=0`. The recom
 | `ref_image_1` | **Required IMAGE** | Character/main subject | One image, mapped to `<Picture 1>`. |
 | `ref_image_2` … `ref_image_9` | Optional IMAGE connections | Background in slot 2; further slots as needed | One image per slot, mapped to its `<Picture N>` tag. Fill consecutively; gaps fail validation. Additional references cost conditioning memory/time. |
 | `ref_image_size` | Choice; `match`; `match` or `max` | `match` | `match` scales large references down toward output pixel area. `max` can retain more reference detail at higher cost. Native reference aspect ratios are preserved. |
-| `appearance_reference` | Optional IMAGE; **required if either filter is enabled** | Clean full-scene image | Fixed color/detail target with comparable framing and lighting. Not another model reference, forced first frame, or pixel overlay. A face crop can bias a different background's color. |
+| `appearance_reference` | Optional IMAGE; **required if either filter or the experimental anchor is enabled** | Clean full-scene image | Fixed color/detail target with comparable framing and lighting. Also supplies the hidden continuation anchor when enabled. Not another numbered reference or a pixel overlay. A face crop can bias a different background's color. |
 
 Ref2va has no `audio_denoise`, `audio_noise_mask`, or `reference_image_each_chunk` widgets. Audio locking and reusing every image reference are enforced by this node.
 
@@ -189,10 +191,93 @@ Ref2va has no `audio_denoise`, `audio_noise_mask`, or `reference_image_each_chun
 | `fps` | FLOAT | Fixed `24.0`. Connect directly to the saver. |
 | `frame_count` | INT | `ceil(audio_samples × 24 / sample_rate)`. |
 | `report` | STRING / JSON | Connect to PreviewAny to inspect chunk boundaries, seeds, prompts, audio-lock state and correction settings. |
+| `latent` | LATENT | **One video-only latent of the whole stitched video**, re-encoded after color/detail correction. Direct input for the H3 latent upscaler; not a chunk list or just the last chunk. |
+| `positive` | CONDITIONING | Global prompt and image guidance for the complete video. Ref2va keeps its reference blocks; FL2VA keeps vision embeddings without its fixed-resolution first-frame anchor. |
+| `negative` | CONDITIONING | Empty conditioning, matching the generator's CFG 1 / no-negative-prompt setup. Use BasicGuider or CFG 1 for subsequent sampling. |
+
+## Whole-video latent outputs for upscaling
+
+Both lip-sync nodes append `latent`, `positive`, and `negative` after their original five outputs. Existing image/audio/report connections keep their port indices. Restart ComfyUI and reload the updated workflow to show the new ports.
+
+The node first assembles every generated chunk, removes overlap, applies enabled appearance correction, and crops to the source audio's duration. It then encodes that **complete stitched frame sequence** with the H3 video VAE. This avoids concatenating independently phased generation latents. Export uses at most 73 input frames per call, preserving the VAE's global 17-frame clip phase and final token trimming. The complete resulting latent stays in CPU RAM. This bounds temporary input conversions, but still requires encoding the entire video and does not guarantee a particular VRAM peak or speed.
+
+**`export_refinement` — BOOLEAN, default `true`:** keep enabled for whole-video latent upscaling/refinement. Set to `false` when you only need finished video/audio, and disconnect downstream refinement nodes. This skips the final video encode and global conditioning rebuild; `latent` returns `None`, and `positive`/`negative` return empty lists. Image/audio output, stabilization and temporal context remain active. Merely leaving the latent port disconnected does not skip export when this switch is enabled.
+
+The terminal distinguishes **video VAE decode**, **context-tail VAE encode**, and **whole-video latent export**. A VAE load after the last sampling bar can be the final export, which previously had no progress messages. Export now reports each completed window and checks cancellation between windows. Smaller windows limit memory, but add some repeated encoding work for lookahead frames.
+
+Wire the whole latent into the installed **Minimax H3 Latent Upscaler (3D)**:
+
+```text
+Lip-sync latent → H3 Latent Upscaler (3D), enable_chunking=true
+                → VAE Decode using the H3 video VAE
+                → Image From Batch, batch_index=0
+Lip-sync frame_count → Image From Batch.length
+Trimmed images + lip-sync audio + lip-sync fps → Save Video (Exact Audio)
+```
+
+Convert `Image From Batch.length` to an input and connect `frame_count` directly. Start with the upscaler's `align=32`, a suitable scale such as 2×, and its internal chunking enabled. The generator supplies a standard video tensor `[1, 24, T, H/16, W/16]`, not an AV NestedTensor. The upscaler does not need positive or negative conditioning for pure latent upscaling.
+
+**Terminal padding:** the whole-video encode repeats the last corrected frame to reach the next H3 `17k+5` grid point. Only this temporary encoding view is padded; the normal `images`, `audio`, and `frame_count` outputs stay unchanged. After decoding the upscaled latent, keep the first `frame_count` frames. For example, 289 visible frames encode on a 294-frame grid, so remove the last 5 decoded frames. The report includes `latent_encoded_frame_count` and `latent_padding_frames`. Use the original `frame_count` connection because third-party nodes may discard the latent's extra metadata.
+
+**Conditioning for later refinement:** `positive` is rebuilt from the global visual prompt and original images for the complete timeline. It excludes chunk-local motion markers and `chunk_prompts` suffixes, which have local times and cannot be treated as one global prompt. FL2VA's fixed-resolution first-frame latent anchor is also removed to avoid a spatial token mismatch after upscaling; its Qwen image embeddings remain. Ref2va references carry their own spatial dimensions and stay present. `negative` is an empty CONDITIONING, since no negative prompt was used during generation. If a separate refinement workflow needs CFG above 1 or negative text, create compatible negative conditioning there.
+
+For a separate **diffusion refinement** pass, connect the full-video positive/negative outputs to the appropriate sampler/guider. H3 sampling also needs a correctly aligned audio latent: encode the original recording with the H3 audio VAE, lock its noise mask to zero, and combine it with the upscaled video using **Concat AV Latent**. Its conditioning duration must cover the padded video grid; preserve the original AUDIO for final saving. Simply sending the video-only latent to an AV sampler does not supply speech conditioning.
+
+The upscaler's `enable_chunking` applies to the **upscaling network only**. It does not automatically chunk a later diffusion sampler. Very long full-video diffusion refinement can exceed model memory/training duration; use an H3 refinement workflow that explicitly supports that duration or manages its own temporal windows. The outputs provide the complete video data; the original timeline Director's Refine port is still separate.
+
+The export path has also been checked with real H3 video-VAE and H3 3D upscaler weights on a 421-frame synthetic sequence: 430 padded frames encoded to `[1, 24, 127, 2, 2]`, upscaled 2× with six internal temporal chunks, and decoded to 430 frames at 64×64. This checks the full-latent interface and timing at small resolution, not full-resolution visual quality or a diffusion-refinement pass. The optional reproduction script is `tests/smoke_lipsync_export.py`.
 
 ## Color and sharpness stabilization
 
 The same correction code runs in FL2VA and ref2va. Original image conditioning helps keep appearance consistent; optional filters address accumulated color/contrast shifts and overly harsh fine texture.
+
+### Experimental original-image anchor in every continuation
+
+`reference_image_each_chunk=true` retains FL2VA's original **vision embeddings**,
+but the normal motion-context path replaces the image's frame-zero **latent
+keyframe** with the generated tail. These are different conditioning paths.
+Color/detail filters adjust statistics; they cannot restore a face or texture
+that has already changed substantially.
+
+The new `first_frame_anchor_strength` restores that stronger original-image
+signal in the oldest **hidden** context keyframe on every continuation chunk.
+At `1`, that keyframe is exactly the fixed image encoding. All remaining context
+blocks and their timestamps are retained; with 22 context frames, the other
+21 frame positions still carry the recent motion. The complete 22-frame head
+is discarded as before, so no original still is inserted into the visible
+video and the source-audio timeline does not shift. This can still influence
+visible motion or cause a pose pull; a seamless join is not guaranteed.
+
+For FL2VA, the fixed latent is captured from the first chunk's original image
+conditioning, before context replacement, and reused without recursive
+re-encoding. For ref2va it is encoded from the explicit full-scene
+`appearance_reference`. The first ref2va chunk remains reference-conditioned;
+the extra hidden anchor begins with chunk 2. All numbered image references
+remain active. The whole-video exported positive does not contain these local
+anchors, just as it excludes ordinary chunk context.
+
+This control defaults to `0` to retain existing behavior. Compare `1` and `0`
+using the same seed, model, prompt, resolution and source files. Intermediate
+values blend two image latents; they are not attention/CFG weights or a
+color-only correction. Use it first on static talking shots, and lower it if
+motion/framing is pulled back too strongly. This anchoring strategy is
+experimental: tests verify the conditioning and timing, not improved visual
+quality for every recording.
+
+### Choosing a clean comparison
+
+If drift persists with color/detail strengths already near `1`, do not assume
+still stronger filtering will recover detail. Compare a base-model render with
+the FP16 video VAE, a single normal input resize, and a stable visual prompt.
+Then isolate the anchor setting in two otherwise identical runs. Turbo LoRAs,
+quantized video decoding, aggressive input enhancement and changing framing
+are additional variables; a single output does not identify which caused drift.
+
+The anchor uses the existing H3 keyframe mechanism; official examples also
+demonstrate combining timed image guides with references in the
+[ComfyUI H3 multi-frame template](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/video_minimax_h3_multiframe_reference.json).
+Replacing the oldest hidden context keyframe is this fork's experimental
+strategy, not a quality guarantee from that template.
 
 ```mermaid
 flowchart LR
@@ -274,6 +359,7 @@ For additional implementation details, see [FL2VA timing and audio](docs/long-au
 | Frames become too soft or the grade changes too much | Lower the relevant strength toward `0`; check whether the appearance target matches the intended full composition. |
 | Visible seam or pose jump | Start at 22 context frames, stable framing and restrained motion. Try 39 context frames as a controlled comparison; there is no guaranteed seamless setting. |
 | GPU out of memory | Reduce resolution, sampled duration, or reference cost; use `ref_image_size=match` and enable cleanup. H3 weights still need sufficient memory. |
+| Sampling works but each video VAE decode spills into shared memory | Enable `clear_vram_between_chunks`. Both lip-sync nodes release sampling inputs and move the sampled video latent to CPU before decoding; with cleanup enabled, they also unload models before loading the video VAE. This leaves more VRAM for decoding, at the cost of model reloads. Whole-video latent/conditioning export runs after all chunks finish, so it adds a separate final encode rather than accumulating those outputs on GPU during chunk decoding. |
 | CPU RAM grows throughout generation | The complete output IMAGE tensor remains in RAM. Lower resolution or process shorter recordings. Reducing chunk size does not reduce the final frame buffer. |
 | Video timing changes after export | Keep saver fps at 24 or connect the generator's fps output; do not independently retime the frame sequence. |
 | MKV does not preview in the browser | Use a player supporting MKV and floating PCM. MP4/AAC is an alternative when sample-exact audio is not required. |

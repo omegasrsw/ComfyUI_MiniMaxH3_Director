@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 import math
+import logging
+import time
 
 import torch
 import torch.nn.functional as F
@@ -20,8 +22,10 @@ from .core_sampling import _unpack_node_output, sample_single_stage
 from .vram_cleanup import cleanup_segment_vram
 from .appearance import AppearanceStabilizer
 from .lipsync_refs import normalize_lipsync_refs, validate_reference_image
+from .lipsync_anchor import validate_anchor_strength, encode_scene_anchor, original_fl2va_anchor, anchor_context_head
 
 FPS = 24
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -169,13 +173,15 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
                      chunk_prompts="", reference_image_each_chunk=True,
                      color_stabilization=0.0, detail_stabilization=0.0,
                      generation_mode="fl2va", ref_images=None, ref_image_size="match",
-                     appearance_reference=None):
+                     appearance_reference=None, first_frame_anchor_strength=0.0,
+                     export_refinement=True):
     from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo
     from comfy.utils import ProgressBar
     import comfy.model_management as mm
     from nodes import VAEDecode
 
     waveform, rate = validate_audio(audio)
+    validate_anchor_strength(first_frame_anchor_strength)
     if width < 32 or height < 32 or width % 32 or height % 32:
         raise ValueError("width and height must be positive multiples of 32.")
     if not math.isfinite(audio_denoise) or not 0 <= audio_denoise <= 1:
@@ -194,6 +200,8 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
             validate_reference_image(appearance_reference, "appearance_reference")
         if (color_stabilization or detail_stabilization) and appearance_reference is None:
             raise ValueError("Connect appearance_reference to enable ref2va color/detail stabilization; use an image of the intended full scene.")
+        if first_frame_anchor_strength and appearance_reference is None:
+            raise ValueError("Connect a full-scene appearance_reference for ref2va first_frame_anchor_strength.")
         appearance_image = appearance_reference
     else:
         validate_reference_image(first_frame, "first_frame")
@@ -209,20 +217,29 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
     if audio_noise_mask is not None:
         # Validate before loading the expensive text encoder / diffusion model.
         audio_mask_for_chunk(audio_noise_mask, chunks[0], torch.zeros(1, 32, 2, 1), total_frames, audio_denoise)
-    progress = ProgressBar(len(chunks))
+    encoded_frame_count = minimax_align_frame_count(total_frames) if export_refinement else total_frames
+    progress = ProgressBar(len(chunks) + int(export_refinement))
+    log.info("H3 lip sync: %d frames, %d generation chunks; refinement export %s",
+             total_frames, len(chunks), "enabled" if export_refinement else "disabled")
     output = None
+    output_storage = None
+    full_latent, full_positive, full_negative = None, [], []
     previous = None
+    fixed_anchor = None
     records = []
     try:
         with torch.inference_mode():
             for chunk, chunk_prompt in zip(chunks, prompts):
                 mm.throw_exception_if_processing_interrupted()
+                log.info("H3 lip sync: chunk %d/%d conditioning", chunk.index + 1, len(chunks))
                 if generation_mode == "ref2va":
                     from comfy_extras.nodes_minimax_h3 import MiniMaxH3ReferenceToVideo
                     positive, latent = _unpack_node_output(MiniMaxH3ReferenceToVideo.execute(
                         clip=clip, vae=video_vae, prompt=chunk_prompt, width=width, height=height,
                         length=chunk.sample_frames, ref_image_size=ref_image_size, ref_images=ref_images,
                     ))
+                    if first_frame_anchor_strength and fixed_anchor is None:
+                        fixed_anchor = encode_scene_anchor(appearance_reference, video_vae, width, height)
                 else:
                     positive, latent = _unpack_node_output(MiniMaxH3ImageToVideo.execute(
                         clip=clip, vae=video_vae, prompt=chunk_prompt, width=width, height=height,
@@ -231,6 +248,8 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
                         length=chunk.sample_frames,
                         first_frame=first_frame if previous is None or reference_image_each_chunk else None,
                     ))
+                    if first_frame_anchor_strength and fixed_anchor is None:
+                        fixed_anchor = original_fl2va_anchor(positive)
                 if previous is not None:
                     positive, trim, previous_trim = apply_motion_context(
                         positive, latent, vae=video_vae, context_length=chunk.context_frames,
@@ -238,35 +257,51 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
                     )
                     if trim != chunk.context_frames or previous_trim:
                         raise RuntimeError("Lip sync context alignment changed; refusing a shifted audio/video join.")
+                    positive = anchor_context_head(positive, fixed_anchor, first_frame_anchor_strength)
                 latent = inject_source_audio(latent, audio_vae, audio, chunk, mask=audio_noise_mask,
                                              total_frames=total_frames, strength=audio_denoise)
                 chunk_seed = (int(seed) + chunk.index) % (2**64)
+                log.info("H3 lip sync: chunk %d/%d sampling", chunk.index + 1, len(chunks))
                 sampled = sample_single_stage(
                     model=model, positive=positive, negative=[], latent=latent, seed=chunk_seed,
                     cfg=1.0, steps=steps, sampler_name=sampler, scheduler=scheduler,
                     shift_video=shift_video, shift_audio=shift_audio, sigmas=sigmas,
                 )
-                decoded = VAEDecode().decode(video_vae, sampled)[0]
+                # Decoding only needs video. Release the AV sampling inputs,
+                # masks and conditioning before asking ComfyUI to load the VAE.
+                # Keep the sampled video on CPU so model unloading can reclaim
+                # VRAM even when the sampler's intermediate device is CUDA.
+                video = sampled["samples"].unbind()[0].detach().cpu()
+                del positive, latent, sampled
+                cleanup_segment_vram(enabled=clear_vram_between_chunks)
+                log.info("H3 lip sync: chunk %d/%d video VAE decode starting", chunk.index + 1, len(chunks))
+                decode_start = time.perf_counter()
+                decoded = VAEDecode().decode(video_vae, {"samples": video})[0]
+                log.info("H3 lip sync: chunk %d/%d video VAE decode finished in %.1fs",
+                         chunk.index + 1, len(chunks), time.perf_counter() - decode_start)
                 stop = chunk.context_frames + chunk.visible_frames
                 if decoded.shape[0] < stop:
                     raise RuntimeError(f"Chunk {chunk.index + 1} decoded {decoded.shape[0]} frames; need {stop}.")
                 visible = decoded[chunk.context_frames:stop].detach().cpu().float()
+                log.info("H3 lip sync: chunk %d/%d appearance correction and stitching", chunk.index + 1, len(chunks))
                 visible = appearance.process(visible)
                 if output is None:
                     # One final allocation instead of retaining every chunk and
                     # torch.cat doubling peak RAM. IMAGE output still scales with duration.
-                    output = torch.empty((total_frames, *visible.shape[1:]), dtype=torch.float32)
+                    output_storage = torch.empty((encoded_frame_count, *visible.shape[1:]), dtype=torch.float32)
+                    output = output_storage[:total_frames]
                 output[chunk.start_frame:chunk.end_frame].copy_(visible)
                 # Retain only the phase-aligned video tail for the next chunk.
                 # Audio is always re-encoded from source, never from generated speech.
                 from comfy.nested_tensor import NestedTensor
                 from .h3_motion_context import steps_for_frames
                 tail_steps = steps_for_frames(context_frames)
-                video = sampled["samples"].unbind()[0]
                 if appearance.enabled and chunk.index + 1 < len(chunks):
                     # Feed corrected appearance back into the next generation.
                     # Prefix frames have already been removed; never filter or
                     # re-export the overlap twice. Re-encode only this short tail.
+                    log.info("H3 lip sync: chunk %d/%d context-tail VAE encode (%d frames)",
+                             chunk.index + 1, len(chunks), context_frames)
                     tail = video_vae.encode(visible[-context_frames:])
                     if tail.ndim != 5 or tail.shape[2] != tail_steps or tail.shape[3:] != video.shape[3:]:
                         raise RuntimeError("Corrected appearance tail does not match the H3 context grid.")
@@ -275,12 +310,31 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
                 else:
                     previous = {"samples": NestedTensor((video[:, :, -tail_steps:].detach().cpu().clone(),))}
                 records.append({**asdict(chunk), "audio_start_frame": chunk.audio_start_frame,
-                                "seed": chunk_seed, "prompt": chunk_prompt})
+                                "seed": chunk_seed, "prompt": chunk_prompt,
+                                "first_frame_anchor_applied": bool(chunk.index and first_frame_anchor_strength)})
                 progress.update_absolute(chunk.index + 1)
-                del positive, latent, sampled, decoded, visible, video
+                del decoded, visible, video
                 cleanup_segment_vram(enabled=clear_vram_between_chunks)
+            from .lipsync_export import export_stitched_video
+            mm.throw_exception_if_processing_interrupted()
+            # Reserve at most 16 extra frames in the original allocation;
+            # do not duplicate the entire long RGB buffer to pad its end.
+            if encoded_frame_count > total_frames:
+                output_storage[total_frames:].copy_(output[-1:])
+            if export_refinement:
+                log.info("H3 lip sync: generation finished; whole-video latent export starting (%d padded frames)",
+                         encoded_frame_count)
+                full_latent, full_positive, full_negative = export_stitched_video(
+                    frames=output_storage, frame_count=total_frames, video_vae=video_vae,
+                    clip=clip, prompt=prompt, width=width, height=height,
+                    generation_mode=generation_mode, first_frame=first_frame,
+                    ref_images=ref_images, ref_image_size=ref_image_size)
+                progress.update_absolute(len(chunks) + 1)
+            log.info("H3 lip sync: finished")
     finally:
         previous = None
+        fixed_anchor = None
+        cleanup_segment_vram(enabled=clear_vram_between_chunks)
     report = json.dumps({
         "mode": "long_audio_lipsync", "fps": FPS, "frame_count": total_frames,
         "audio_samples": waveform.shape[-1], "audio_sample_rate": rate,
@@ -293,6 +347,14 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
         "reference_image_each_chunk": bool(reference_image_each_chunk or generation_mode == "ref2va"),
         "color_stabilization": float(color_stabilization),
         "detail_stabilization": float(detail_stabilization),
+        "first_frame_anchor_strength": float(first_frame_anchor_strength),
+        "first_frame_anchor_mode": "oldest hidden context keyframe; remaining motion context retained",
         "context_source": "corrected decoded tail" if appearance.enabled else "sampled latent tail",
+        "export_refinement": bool(export_refinement),
+        "latent_output": "whole stitched video, re-encoded after stabilization" if export_refinement else "disabled",
+        "latent_encoded_frame_count": encoded_frame_count if export_refinement else 0,
+        "latent_padding_frames": encoded_frame_count - total_frames,
+        "export_conditioning": "global prompt and original image references; no chunk-local context" if export_refinement else "disabled",
+        "export_chunk_prompt_suffixes": "not included; use global prompt for full-video refinement",
     }, indent=2, ensure_ascii=False)
-    return output, audio, float(FPS), total_frames, report
+    return output, audio, float(FPS), total_frames, report, full_latent, full_positive, full_negative

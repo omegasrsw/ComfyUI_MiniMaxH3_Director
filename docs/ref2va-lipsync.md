@@ -5,6 +5,19 @@ clothing, props, or other image references, driven by a full speech recording.
 The node generates overlapping chunks for the entire audio, keeping all image
 references active alongside the previous generated video tail.
 
+`export_refinement` defaults to `true` for whole-video latent/conditioning
+outputs. Export runs after generation in bounded, phase-aligned VAE windows
+with terminal progress messages. Set it to `false` for video/audio-only runs
+and disconnect downstream refinement nodes: the latent is then `None` and
+both conditioning outputs are empty. Stabilization and context remain active.
+
+The `latent`, `positive`, and `negative` outputs represent the **whole stitched
+video** for later upscale/refinement. `latent` is video-only, re-encoded after
+stabilization; `positive` uses the global prompt and all image references,
+without chunk-local context; `negative` is empty (CFG 1). See
+[whole-video export and wiring](../README.md#whole-video-latent-outputs-for-upscaling)
+for direct H3 upscaler connections and trimming terminal VAE-grid padding.
+
 For long runs affected by increasing sharpness or color drift, load the
 [stabilized example workflow](../example_workflows/minimax_h3_director_long_audio_lipsync_ref2va_stabilized.json).
 It includes a connected appearance-image loader and enables both corrections
@@ -66,6 +79,14 @@ progression and optional per-chunk prompt suffixes work as described in the
 in the global prompt: it is reused for every chunk. No ASR is run automatically.
 
 ## Countering color and sharpness drift
+
+An additional **experimental** `first_frame_anchor_strength` control can place
+the fixed `appearance_reference` image latent in the oldest hidden context
+keyframe of each continuation. It requires a whole-scene image even if both
+filters are off. Remaining motion context and all numbered references stay
+active. Default `0` retains existing behavior; compare `1` with `0` using a
+fixed seed. It may affect pose/framing and has not been visually validated as
+a general cure. See [anchor details](../README.md#experimental-original-image-anchor-in-every-continuation).
 
 In the stabilized example, load a clean image of the intended **complete scene**
 into **Appearance target: intended FULL scene**. Match the intended framing,

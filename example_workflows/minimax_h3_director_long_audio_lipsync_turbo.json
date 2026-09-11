@@ -407,6 +407,21 @@
           "links": [
             14
           ]
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": null
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": null
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "links": null
         }
       ],
       "properties": {
@@ -430,7 +445,9 @@
         "",
         true,
         0.0,
-        0.0
+        0.0,
+        0.0,
+        true
       ]
     },
     {

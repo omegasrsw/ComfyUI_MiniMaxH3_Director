@@ -376,6 +376,21 @@
           "links": [
             11
           ]
+        },
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "links": null
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "links": null
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "links": null
         }
       ],
       "properties": {
@@ -398,7 +413,9 @@
         "",
         0.35,
         0.35,
-        "match"
+        "match",
+        0.0,
+        true
       ],
       "title": "Ref2VA lip sync + color/detail stabilization"
     },

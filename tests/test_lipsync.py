@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
+import weakref
 from unittest.mock import patch
 
 import torch
@@ -17,6 +18,7 @@ package.__path__ = [str(ROOT)]
 sys.modules.setdefault(package.__name__, package)
 ls = importlib.import_module("mmx_test_package.director.lipsync")
 mc = importlib.import_module("mmx_test_package.director.h3_motion_context")
+le = importlib.import_module("mmx_test_package.director.lipsync_export")
 
 
 class TimelineTests(unittest.TestCase):
@@ -107,11 +109,21 @@ class ExecutionTests(unittest.TestCase):
         self.cleanups = []
         self.reference_each_chunk = True
         self.reference_calls = []
+        self.conditioning_calls = []
+        self.real_export = False
+        actual_export = le.export_stitched_video
+
+        def export(**kwargs):
+            if self.real_export:
+                return actual_export(**kwargs)
+            return {'samples': torch.zeros(1, 24, mc.steps_for_frames(len(kwargs['frames'])), 2, 2)}, [], []
 
         def conditioning(**kwargs):
+            self.conditioning_calls.append(kwargs)
             n = kwargs['length']
             self.assertEqual(kwargs['first_frame'] is None, len(self.samples) > 0 and not self.reference_each_chunk)
-            return ['positive'], {'samples': Nested((torch.zeros(1, 24, mc.steps_for_frames(n), 2, 2),
+            metadata = {'minimax_keyframes': [{'resolved_frame_index': 0, 'latent': torch.zeros(1, 24, 1, 2, 2)}]}
+            return [[torch.zeros(1, 7, 8), metadata]], {'samples': Nested((torch.zeros(1, 24, mc.steps_for_frames(n), 2, 2),
                                                    torch.zeros(1, 32, 2, round(n / 24 * 40))))}
 
         def encode(vae, audio):
@@ -138,14 +150,20 @@ class ExecutionTests(unittest.TestCase):
             return {'samples': Nested((video, audio)), 'index': len(self.samples) - 1}
 
         def decode(vae, latent):
-            n = mc.pixel_frames_for_latent_t(latent['samples'].unbind()[0].shape[2])
+            self.assertEqual(set(latent), {'samples'})
+            self.assertIsInstance(latent['samples'], torch.Tensor)
+            self.assertEqual(latent['samples'].device.type, 'cpu')
+            n = mc.pixel_frames_for_latent_t(latent['samples'].shape[2])
             return (torch.arange(n).reshape(-1, 1, 1, 1).expand(n, 2, 2, 3).float(),)
 
         def context(positive, latent, **kwargs):
             self.contexts.append(kwargs)
             # Exercise actual phase-aligned extraction on the compact retained tail.
-            _, _, covered, _, gap = mc._video_tail_blocks(kwargs['context_latent'], kwargs['context_length'])
+            blocks, offsets, covered, _, gap = mc._video_tail_blocks(kwargs['context_latent'], kwargs['context_length'])
             self.assertFalse(kwargs['continue_audio'])
+            positive = [[embedding, {**metadata, 'minimax_keyframes': [
+                {'resolved_frame_index': 0, 'director_context_index': offset, 'latent': block}
+                for offset, block in zip(offsets, blocks)]}] for embedding, metadata in positive]
             return positive, covered, gap
 
         def module(name, **attrs):
@@ -167,6 +185,7 @@ class ExecutionTests(unittest.TestCase):
             'nodes': module('nodes', VAEDecode=lambda: types.SimpleNamespace(decode=decode)),
         }
         self.patches = [patch.dict(sys.modules, mods), patch.object(ls, 'sample_single_stage', side_effect=sample),
+                        patch.object(le, 'export_stitched_video', side_effect=export),
                         patch.object(ls, 'apply_motion_context', side_effect=context),
                         patch.object(ls, 'cleanup_segment_vram', side_effect=lambda **k: self.cleanups.append(k))]
         for p in self.patches:
@@ -176,9 +195,11 @@ class ExecutionTests(unittest.TestCase):
     def run_generation(self, samples=32000 * 27 + 7, **kwargs):
         self.audio = {'waveform': torch.ones(1, 1, samples), 'sample_rate': 32000}
         video_vae = kwargs.pop('video_vae', None)
-        return ls.generate_lipsync(model=None, clip=None, video_vae=video_vae, audio_vae=None,
+        self.real_export = kwargs.pop('export_latent', False)
+        self.result = ls.generate_lipsync(model=None, clip=None, video_vae=video_vae, audio_vae=None,
             audio=self.audio, first_frame=torch.ones(1, 32, 32, 3), prompt='speech', width=32, height=32,
             seed=2**64-1, **kwargs)
+        return self.result[:5]
 
     def test_multichunk_exact_output_and_overlap_removal(self):
         images, audio, fps, count, report = self.run_generation()
@@ -192,7 +213,56 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(images[c['start_frame'], 0, 0, 0], c['context_frames'])
             self.assertEqual(images[c['end_frame'] - 1, 0, 0, 0], c['context_frames'] + c['end_frame'] - c['start_frame'] - 1)
         self.assertEqual([s['seed'] for s in self.samples[:2]], [2**64-1, 0])
-        self.assertEqual(len(self.cleanups), len(chunks))
+        self.assertEqual(len(self.cleanups), 2 * len(chunks) + 1)
+
+    def test_sampling_allocations_released_before_decode(self):
+        sample_impl = ls.sample_single_stage.side_effect
+        allocations = []
+        events = []
+
+        def sample(**kwargs):
+            result = sample_impl(**kwargs)
+            allocations.extend(weakref.ref(tensor) for tensor in (
+                kwargs['positive'][0][0],
+                kwargs['latent']['noise_mask'].unbind()[0],
+                result['samples'].unbind()[1],
+            ))
+            # The normal test recorder retains inputs; real sampling doesn't.
+            self.samples.clear()
+            events.append('sample')
+            return result
+
+        def cleanup(**kwargs):
+            self.assertTrue(kwargs['enabled'])
+            events.append('cleanup')
+
+        def decode(vae, latent):
+            self.assertEqual(events[-2:], ['sample', 'cleanup'])
+            self.assertTrue(all(ref() is None for ref in allocations))
+            self.assertEqual(latent['samples'].device.type, 'cpu')
+            events.append('decode')
+            return (torch.zeros(124, 2, 2, 3),)
+
+        with patch.object(ls, 'sample_single_stage', new=sample), \
+                patch.object(ls, 'cleanup_segment_vram', side_effect=cleanup), \
+                patch.object(sys.modules['nodes'], 'VAEDecode', return_value=types.SimpleNamespace(decode=decode)):
+            self.run_generation(samples=1)
+        self.assertIn('decode', events)
+
+    def test_model_cleanup_can_be_disabled(self):
+        self.run_generation(clear_vram_between_chunks=False)
+        self.assertTrue(self.cleanups)
+        self.assertTrue(all(call['enabled'] is False for call in self.cleanups))
+
+    def test_refinement_export_can_be_skipped_in_both_modes(self):
+        for run in (self.run_generation, self.run_reference_generation):
+            self.samples.clear()
+            with patch.object(le, 'export_stitched_video', side_effect=AssertionError('export must be skipped')):
+                images, audio, _, count, report = run(export_refinement=False)
+            self.assertEqual(len(images), count)
+            self.assertIs(audio, self.audio)
+            self.assertEqual(self.result[5:], (None, [], []))
+            self.assertEqual(json.loads(report)['latent_output'], 'disabled')
 
     def test_one_sample_audio(self):
         images, _, _, count, report = self.run_generation(samples=1)
@@ -251,9 +321,59 @@ class ExecutionTests(unittest.TestCase):
         self.audio = {'waveform': torch.linspace(-0.3, 0.4, 44100 * 12 + 7).reshape(1, 1, -1).repeat(1, 2, 1), 'sample_rate': 44100}
         self.original_waveform = self.audio['waveform'].clone()
         video_vae = kwargs.pop('video_vae', None)
-        return ref_node().execute(model=None, clip=None, video_vae=video_vae, audio_vae=None, audio=self.audio,
+        self.real_export = kwargs.pop('export_latent', False)
+        self.result = ref_node().execute(model=None, clip=None, video_vae=video_vae, audio_vae=None, audio=self.audio,
             ref_image_1=torch.ones(1, 32, 32, 3), ref_image_2=torch.zeros(1, 32, 32, 3),
             prompt='The character in <Picture 1> in the room in <Picture 2>.', width=32, height=32, **kwargs)
+        return self.result[:5]
+
+    def test_whole_video_export_includes_all_corrected_frames_and_global_conditioning(self):
+        encoded_frames = []
+        def encode(frames):
+            encoded_frames.append(frames.clone())
+            return torch.full((1, 24, mc.steps_for_frames(len(frames)), 2, 2), 0.4)
+        images, audio, _, count, report = self.run_reference_generation(
+            video_vae=types.SimpleNamespace(encode=encode), export_latent=True,
+            appearance_reference=torch.full((1, 32, 32, 3), 0.3),
+            color_stabilization=0.35, detail_stabilization=0.35,
+            chunk_seconds=5.17, chunk_prompts='["first", "second", "third"]')
+        latent, positive, negative = self.result[5:]
+        padded = ls.minimax_align_frame_count(count)
+        self.assertEqual(count, 289)
+        # First two encodes are corrected context tails. Export windows overlap
+        # by five lookahead frames, which are not duplicated in the output.
+        windows = encoded_frames[2:]
+        self.assertTrue(all(len(window) <= 73 for window in windows))
+        stitched = torch.cat([window[:-5] for window in windows[:-1]] + windows[-1:])
+        self.assertEqual(len(stitched), padded)
+        self.assertTrue(torch.equal(stitched[:count], images))
+        self.assertTrue(torch.equal(stitched[count:], images[-1:].expand(padded-count, -1, -1, -1)))
+        self.assertEqual(tuple(latent['samples'].shape), (1, 24, mc.steps_for_frames(padded), 2, 2))
+        self.assertEqual(latent['minimax_h3_frame_count'], count)
+        self.assertFalse(latent['samples'].requires_grad)
+        self.assertEqual(negative, [])
+        self.assertEqual(len(positive[0][1]['minimax_refs']), 2)
+        self.assertNotIn('minimax_keyframes', positive[0][1])
+        self.assertEqual(positive[0][1]['minimax_frame_count'], padded)
+        self.assertEqual(self.reference_calls[-1]['prompt'], 'The character in <Picture 1> in the room in <Picture 2>.')
+        self.assertEqual(json.loads(report)['latent_padding_frames'], padded-count)
+        self.assertIs(audio, self.audio)
+        self.assertTrue(torch.equal(audio['waveform'], self.original_waveform))
+
+    def test_fl2va_whole_export_pads_very_short_audio_and_keeps_global_prompt(self):
+        encoded_frames = []
+        def encode(frames):
+            encoded_frames.append(frames.clone())
+            return torch.zeros(1, 24, mc.steps_for_frames(len(frames)), 2, 2)
+        images, _, _, count, _ = self.run_generation(samples=1, export_latent=True,
+            video_vae=types.SimpleNamespace(encode=encode), chunk_prompts='["chunk suffix"]')
+        self.assertEqual(count, 1)
+        self.assertEqual(len(encoded_frames[-1]), 5)
+        self.assertTrue(torch.equal(encoded_frames[-1], images.expand(5, -1, -1, -1)))
+        self.assertEqual(self.conditioning_calls[-1]['prompt'], 'speech')
+        self.assertEqual(self.result[5]['samples'].shape[2], 2)
+        self.assertEqual(self.result[6][0][1]['minimax_frame_count'], 5)
+        self.assertNotIn('minimax_keyframes', self.result[6][0][1])
 
     def test_reference_images_persist_and_audio_is_bitwise_unchanged(self):
         images, audio, fps, count, report = self.run_reference_generation()
@@ -286,6 +406,29 @@ class ExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'appearance_reference'):
             self.run_reference_generation(color_stabilization=0.35)
         self.assertEqual(len(self.reference_calls), 0)
+
+    def test_anchor_requires_full_scene_reference_for_ref2va(self):
+        with self.assertRaisesRegex(ValueError, 'full-scene appearance_reference'):
+            self.run_reference_generation(first_frame_anchor_strength=1)
+        self.assertEqual(len(self.samples), 0)
+
+    def test_reference_anchor_is_fixed_across_later_chunks_with_audio_unchanged(self):
+        def encode(frames):
+            t = 1 if len(frames) == 1 else mc.steps_for_frames(len(frames))
+            return torch.full((1, 24, t, 2, 2), float(frames.mean()))
+        _, audio, _, count, report = self.run_reference_generation(
+            video_vae=types.SimpleNamespace(encode=encode), chunk_seconds=5.17,
+            appearance_reference=torch.full((1, 32, 32, 3), 0.7), first_frame_anchor_strength=1)
+        self.assertEqual(len(self.samples), 3)
+        self.assertEqual(count, 289)
+        self.assertTrue(torch.equal(audio['waveform'], self.original_waveform))
+        for sample in self.samples[1:]:
+            metadata = sample['positive'][0][1]
+            keys = metadata['minimax_keyframes']
+            torch.testing.assert_close(keys[0]['latent'], torch.full_like(keys[0]['latent'], 0.7))
+            self.assertTrue(all(k['latent'].count_nonzero() == 0 for k in keys[1:]))
+            self.assertEqual(len(metadata['minimax_refs']), 2)
+        self.assertEqual([c['first_frame_anchor_applied'] for c in json.loads(report)['chunks']], [False, True, True])
 
     def test_reference_correction_feeds_exported_tail_without_changing_audio(self):
         tails, encoded_tails = [], []
@@ -345,13 +488,15 @@ class WorkflowTests(unittest.TestCase):
             audio_link = next(i['link'] for i in create['inputs'] if i['name'] == 'audio')
             self.assertEqual(links[audio_link][1:3], [gen['id'], 1])
             values = gen['widgets_values']
+            self.assertEqual([(o['name'], o['type']) for o in gen['outputs'][5:]],
+                             [('latent', 'LATENT'), ('positive', 'CONDITIONING'), ('negative', 'CONDITIONING')])
             self.assertEqual(values[3:5], [10.0, 22])
             self.assertEqual(values[6], 'fixed')
             if gen['type'] == 'MiniMaxH3DirectorRefAudioLipSync':
                 self.assertEqual(create['type'], 'MiniMaxH3SaveVideoExactAudio')
                 stabilized = path.stem.endswith('_stabilized')
                 strength = 0.35 if stabilized else 0.0
-                self.assertEqual(values[12:], [True, '', strength, strength, 'match'])
+                self.assertEqual(values[12:], [True, '', strength, strength, 'match', 0.0, True])
                 appearance_link = next(i['link'] for i in gen['inputs'] if i['name'] == 'appearance_reference')
                 if stabilized:
                     self.assertIsNotNone(appearance_link)
@@ -361,7 +506,7 @@ class WorkflowTests(unittest.TestCase):
             else:
                 self.assertEqual(values[12], 0.0)  # lock source audio
                 self.assertEqual(values[14], '')  # optional chunk prompts
-                self.assertEqual(values[15:], [True, 0.0, 0.0])
+                self.assertEqual(values[15:], [True, 0.0, 0.0, 0.0, True])
 
 
 if __name__ == '__main__':

@@ -7,6 +7,11 @@ Use the [stabilized ref2va preset](minimax_h3_director_long_audio_lipsync_ref2va
 to enable FL2VA's color and excess-detail correction at `0.35`, with a separate
 full-scene appearance reference and corrected-tail feedback between chunks.
 
+All long-audio examples expose whole-video `latent`, `positive`, and `negative`
+outputs after stitching/correction. Connect `latent` directly to the H3 3D
+latent upscaler with its internal chunking enabled; after decoding, trim to
+the generator's `frame_count`. [Wiring and conditioning details](../README.md#whole-video-latent-outputs-for-upscaling).
+
 Long audio lip sync: [base workflow](minimax_h3_director_long_audio_lipsync.json)
 or [adapted Turbo workflow](minimax_h3_director_long_audio_lipsync_turbo.json).
 Load a portrait and full audio recording; the new node loops automatically

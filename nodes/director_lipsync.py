@@ -33,7 +33,8 @@ class MiniMaxH3DirectorLongAudioLipSync:
                 "shift_audio": ("FLOAT", {"default": 3.0, "min": 0.01, "max": 100.0}),
                 "audio_denoise": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01,
                     "tooltip": "0 locks source audio while sampling video. Higher values allow audio to change internally."}),
-                "clear_vram_between_chunks": ("BOOLEAN", {"default": True}),
+                "clear_vram_between_chunks": ("BOOLEAN", {"default": True,
+                    "tooltip": "Unload models before each video VAE decode and between chunks. Recommended for limited VRAM; disabling may reduce reload overhead when everything fits."}),
             },
             "optional": {
                 "sigmas": ("SIGMAS", {"tooltip": "Overrides steps/scheduler. Use the same H3 shifts on the scheduler's model."}),
@@ -46,18 +47,32 @@ class MiniMaxH3DirectorLongAudioLipSync:
                     "tooltip": "Optional bounded color/contrast matching to the input image. Try 0.35 for a static talking shot. Corrected tail is re-encoded as context."}),
                 "detail_stabilization": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
                     "tooltip": "Optional attenuation of excess fine texture relative to the input. Try 0.35. Can soften detail; does not restore identity."}),
+                "first_frame_anchor_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "EXPERIMENTAL: original image latent in the first HIDDEN context keyframe of every continuation chunk. 0=old behavior, 1=full original anchor; intermediate values blend latents. Remaining context keeps recent motion. Can pull pose/framing toward the original. Compare 1 versus 0 with a fixed seed."}),
+                "export_refinement": ("BOOLEAN", {"default": True,
+                    "tooltip": "Encode the whole stitched video for the latent/positive/negative outputs. Adds a final VAE encode after generation. Disable for video/audio-only output: latent=None and conditioning=[]; disconnect downstream refinement nodes."}),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "STRING")
-    RETURN_NAMES = ("images", "audio", "fps", "frame_count", "report")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "STRING", "LATENT", "CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("images", "audio", "fps", "frame_count", "report", "latent", "positive", "negative")
+    OUTPUT_TOOLTIPS = (
+        "Complete stitched video, after optional appearance correction.",
+        "Original input audio, unchanged.", "24 fps.", "Exact visible frame count; trim decoded upscale output to this length.",
+        "Chunk timing and whole-video latent padding report.",
+        "One video-only H3 latent of the whole stitched video, re-encoded after correction. Connect directly to the H3 latent upscaler. End is repeat-padded to the H3 grid. None when export_refinement=false.",
+        "Full-video global prompt and image guidance. Ref2VA keeps reference blocks; FL2VA keeps vision embeddings without its fixed-resolution first-frame anchor. No chunk-local context/suffixes.",
+        "Empty conditioning: the generator uses CFG 1 with no negative prompt. Use BasicGuider or CFG 1 downstream.",
+    )
     FUNCTION = "execute"
     CATEGORY = "MiniMax H3/Director"
     DESCRIPTION = (
         "Generate a continuous lip-sync video for the full input audio. Uses H3 fl2va, "
         "source audio latents and previous video-tail context at 24 fps. Outputs the "
         "original soundtrack and an exact timeline report. Final images use CPU RAM "
-        "proportional to duration."
+        "proportional to duration. Also re-encodes the complete stitched video into one video-only "
+        "latent for H3 upscaling and outputs global positive/empty negative conditioning. "
+        "Trim decoded upscale frames to frame_count to remove terminal VAE-grid padding."
     )
 
     def execute(self, **kwargs):

@@ -8,6 +8,12 @@ audio automatically, using the fl2va model and the previous generated video
 tail as temporal context. It is a separate node in this Director package;
 the existing timeline Director retains its existing behavior.
 
+Both lip-sync nodes also output one **whole-video** `latent`, `positive`, and
+`negative` for downstream upscaling/refinement. The video latent is re-encoded
+from the complete stitched, corrected frames. It is not the final generation
+chunk. See [whole-video export and wiring](../README.md#whole-video-latent-outputs-for-upscaling),
+including terminal-padding removal, global conditioning semantics and memory cost.
+
 ## Load a workflow
 
 - [Base model workflow](../example_workflows/minimax_h3_director_long_audio_lipsync.json):
@@ -115,6 +121,13 @@ the upstream transcription/prompt workflow.
 
 ## Appearance drift over successive chunks
 
+For a stronger original-image signal in continuation chunks, see the new
+[experimental hidden first-frame anchor](../README.md#experimental-original-image-anchor-in-every-continuation).
+`first_frame_anchor_strength=1` restores the fixed original latent at the oldest
+hidden context keyframe; `0` keeps the old path. It retains the other motion
+blocks, overlap trim and audio clock. Compare both with the same fixed seed;
+the visual improvement is not established by the wiring tests.
+
 `reference_image_each_chunk` now defaults to **true**. Previously only the
 first chunk sent the portrait into the text/vision encoder; later chunks
 inherited appearance solely through the generated video tail. Each new
@@ -180,9 +193,31 @@ tensor resides in CPU RAM and grows with audio duration: approximately
 overhead. The node preallocates a single final frame buffer to avoid a second
 full-size concatenation allocation. This is not a streaming disk renderer.
 
-`clear_vram_between_chunks` unloads models between chunks using the existing
-Director cleanup helper. Disable it if keeping models resident fits your
-GPU and improves throughput. ComfyUI cancellation is checked at each chunk
+Whole-video latent export adds a video-VAE encode after all frames are stitched.
+It reserves terminal padding in the existing frame allocation and retains the
+complete encoded latent too; export memory and work grow with the full duration.
+`export_refinement=true` enables this in both modes. Set it to `false` for
+video/audio-only output; disconnect refinement consumers because the latent
+output becomes `None` and both conditioning outputs become empty lists.
+
+Export passes at most 73 frames to each VAE call: 68 core frames plus five
+lookahead frames. Starts remain on the global 17-frame clip grid; each interior
+window keeps its first 20 latent tokens, and only the last window keeps the
+terminal tokens. This preserves the stock H3 encoder's independent-clip layout
+and single final three-token drop. It bounds full-image normalization/dtype
+copies and temporary encoded tensors without changing the stitched timeline.
+The full IMAGE buffer and final CPU latent still grow with duration. Terminal
+messages identify each generation phase and every completed export window.
+
+Before each video VAE decode, both lip-sync modes release the chunk's sampling
+inputs, masks, audio latent and conditioning, and retain only its sampled video
+latent on CPU. `clear_vram_between_chunks=true` also unloads models at this
+handoff and between chunks using the existing Director cleanup helper. This
+gives decoding more VRAM, but adds model reload overhead. Disable it if keeping
+models resident fits your GPU and improves throughput. The whole-video latent
+and conditioning are exported to CPU after all chunks finish; their final
+encode is a separate phase, not an accumulating GPU cache during chunk decoding.
+ComfyUI cancellation is checked at each chunk
 and remains available through its sampler. This mode reruns all chunks after
 an interrupted/changed queue; it does not use the timeline Director's disk
 cache, run-selection, or Refine node.
