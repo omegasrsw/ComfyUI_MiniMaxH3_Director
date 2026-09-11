@@ -5,18 +5,13 @@ clothing, props, or other image references, driven by a full speech recording.
 The node generates overlapping chunks for the entire audio, keeping all image
 references active alongside the previous generated video tail.
 
-`export_refinement` defaults to `true` for whole-video latent/conditioning
-outputs. Export runs after generation in bounded, phase-aligned VAE windows
-with terminal progress messages. Set it to `false` for video/audio-only runs
-and disconnect downstream refinement nodes: the latent is then `None` and
-both conditioning outputs are empty. Stabilization and context remain active.
-
-The `latent`, `positive`, and `negative` outputs represent the **whole stitched
-video** for later upscale/refinement. `latent` is video-only, re-encoded after
-stabilization; `positive` uses the global prompt and all image references,
-without chunk-local context; `negative` is empty (CFG 1). See
-[whole-video export and wiring](../README.md#whole-video-latent-outputs-for-upscaling)
-for direct H3 upscaler connections and trimming terminal VAE-grid padding.
+The node returns corrected images and full-video `positive` / `negative`
+conditioning, with no latent output or whole-video re-encode. Stabilization
+and corrected-tail context remain active. `positive` uses the global prompt
+and all original references without chunk-local context; `negative` is empty
+(CFG 1). For later refinement, encode the corrected frames yourself with native
+VAE Encode and the H3 video VAE. See [external encoding and wiring](../README.md#external-video-encoding-and-refinement)
+for required frame-grid padding and trimming after refinement.
 
 For long runs affected by increasing sharpness or color drift, load the
 [stabilized example workflow](../example_workflows/minimax_h3_director_long_audio_lipsync_ref2va_stabilized.json).

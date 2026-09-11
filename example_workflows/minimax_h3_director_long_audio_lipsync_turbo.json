@@ -409,11 +409,6 @@
           ]
         },
         {
-          "name": "latent",
-          "type": "LATENT",
-          "links": null
-        },
-        {
           "name": "positive",
           "type": "CONDITIONING",
           "links": null
@@ -446,8 +441,7 @@
         true,
         0.0,
         0.0,
-        0.0,
-        true
+        0.0
       ]
     },
     {

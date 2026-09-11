@@ -38,7 +38,6 @@ class MiniMaxH3DirectorRefAudioLipSync(MiniMaxH3DirectorLongAudioLipSync):
         anchor = schema["optional"].pop("first_frame_anchor_strength")
         schema["optional"]["first_frame_anchor_strength"] = (anchor[0], {**anchor[1], "tooltip":
             "EXPERIMENTAL: use appearance_reference (full scene required) as the oldest hidden context keyframe in each continuation. 0=off, 1=full anchor; values between blend latents. Remaining motion context and image references stay active. May pull pose/framing toward the scene reference."})
-        schema["optional"]["export_refinement"] = schema["optional"].pop("export_refinement")
         return schema
 
     DESCRIPTION = (
@@ -48,8 +47,8 @@ class MiniMaxH3DirectorRefAudioLipSync(MiniMaxH3DirectorLongAudioLipSync):
         "Optional color/detail stabilization uses a full-scene appearance reference and feeds the "
         "corrected tail into subsequent chunks, as in the FL2VA lip-sync node. "
         "Use <Picture N> tags to assign reference roles. No generated soundtrack is exported."
-        " Outputs one whole-video latent after stitching/correction, global reference conditioning, "
-        "and empty negative conditioning for downstream upscale/refinement."
+        " Outputs corrected images, global reference conditioning and empty negative conditioning. "
+        "Encode the corrected images externally with the H3 video VAE for upscale/refinement."
     )
 
     def execute(self, ref_image_1, **kwargs):

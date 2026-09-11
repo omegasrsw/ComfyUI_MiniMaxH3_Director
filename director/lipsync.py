@@ -173,8 +173,7 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
                      chunk_prompts="", reference_image_each_chunk=True,
                      color_stabilization=0.0, detail_stabilization=0.0,
                      generation_mode="fl2va", ref_images=None, ref_image_size="match",
-                     appearance_reference=None, first_frame_anchor_strength=0.0,
-                     export_refinement=True):
+                     appearance_reference=None, first_frame_anchor_strength=0.0):
     from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo
     from comfy.utils import ProgressBar
     import comfy.model_management as mm
@@ -217,13 +216,12 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
     if audio_noise_mask is not None:
         # Validate before loading the expensive text encoder / diffusion model.
         audio_mask_for_chunk(audio_noise_mask, chunks[0], torch.zeros(1, 32, 2, 1), total_frames, audio_denoise)
-    encoded_frame_count = minimax_align_frame_count(total_frames) if export_refinement else total_frames
-    progress = ProgressBar(len(chunks) + int(export_refinement))
-    log.info("H3 lip sync: %d frames, %d generation chunks; refinement export %s",
-             total_frames, len(chunks), "enabled" if export_refinement else "disabled")
+    refinement_frame_count = minimax_align_frame_count(total_frames)
+    progress = ProgressBar(len(chunks) + 1)
+    log.info("H3 lip sync: %d frames, %d generation chunks; corrected images and global conditioning outputs",
+             total_frames, len(chunks))
     output = None
-    output_storage = None
-    full_latent, full_positive, full_negative = None, [], []
+    full_positive, full_negative = [], []
     previous = None
     fixed_anchor = None
     records = []
@@ -288,8 +286,7 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
                 if output is None:
                     # One final allocation instead of retaining every chunk and
                     # torch.cat doubling peak RAM. IMAGE output still scales with duration.
-                    output_storage = torch.empty((encoded_frame_count, *visible.shape[1:]), dtype=torch.float32)
-                    output = output_storage[:total_frames]
+                    output = torch.empty((total_frames, *visible.shape[1:]), dtype=torch.float32)
                 output[chunk.start_frame:chunk.end_frame].copy_(visible)
                 # Retain only the phase-aligned video tail for the next chunk.
                 # Audio is always re-encoded from source, never from generated speech.
@@ -315,21 +312,14 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
                 progress.update_absolute(chunk.index + 1)
                 del decoded, visible, video
                 cleanup_segment_vram(enabled=clear_vram_between_chunks)
-            from .lipsync_export import export_stitched_video
+            from .lipsync_conditioning import build_refinement_conditioning
             mm.throw_exception_if_processing_interrupted()
-            # Reserve at most 16 extra frames in the original allocation;
-            # do not duplicate the entire long RGB buffer to pad its end.
-            if encoded_frame_count > total_frames:
-                output_storage[total_frames:].copy_(output[-1:])
-            if export_refinement:
-                log.info("H3 lip sync: generation finished; whole-video latent export starting (%d padded frames)",
-                         encoded_frame_count)
-                full_latent, full_positive, full_negative = export_stitched_video(
-                    frames=output_storage, frame_count=total_frames, video_vae=video_vae,
-                    clip=clip, prompt=prompt, width=width, height=height,
-                    generation_mode=generation_mode, first_frame=first_frame,
-                    ref_images=ref_images, ref_image_size=ref_image_size)
-                progress.update_absolute(len(chunks) + 1)
+            full_positive, full_negative = build_refinement_conditioning(
+                frame_count=total_frames, video_vae=video_vae,
+                clip=clip, prompt=prompt, width=width, height=height,
+                generation_mode=generation_mode, first_frame=first_frame,
+                ref_images=ref_images, ref_image_size=ref_image_size)
+            progress.update_absolute(len(chunks) + 1)
             log.info("H3 lip sync: finished")
     finally:
         previous = None
@@ -350,11 +340,9 @@ def generate_lipsync(*, model, clip, video_vae, audio_vae, audio, first_frame=No
         "first_frame_anchor_strength": float(first_frame_anchor_strength),
         "first_frame_anchor_mode": "oldest hidden context keyframe; remaining motion context retained",
         "context_source": "corrected decoded tail" if appearance.enabled else "sampled latent tail",
-        "export_refinement": bool(export_refinement),
-        "latent_output": "whole stitched video, re-encoded after stabilization" if export_refinement else "disabled",
-        "latent_encoded_frame_count": encoded_frame_count if export_refinement else 0,
-        "latent_padding_frames": encoded_frame_count - total_frames,
-        "export_conditioning": "global prompt and original image references; no chunk-local context" if export_refinement else "disabled",
+        "refinement_frame_count": refinement_frame_count,
+        "refinement_padding_frames": refinement_frame_count - total_frames,
+        "export_conditioning": "global prompt and original image references; no chunk-local context",
         "export_chunk_prompt_suffixes": "not included; use global prompt for full-video refinement",
     }, indent=2, ensure_ascii=False)
-    return output, audio, float(FPS), total_frames, report, full_latent, full_positive, full_negative
+    return output, audio, float(FPS), total_frames, report, full_positive, full_negative

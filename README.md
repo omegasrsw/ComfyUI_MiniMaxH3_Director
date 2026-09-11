@@ -14,7 +14,7 @@ This fork adds audio-driven generation to the original MiniMax H3 Director. Its 
 - [Ref2VA walkthrough](#ref2va-walkthrough)
 - [Suggested starting presets](#suggested-starting-presets)
 - [Complete node parameter guide](#complete-node-parameter-guide)
-- [Whole-video latent outputs for upscaling](#whole-video-latent-outputs-for-upscaling)
+- [External video encoding and refinement](#external-video-encoding-and-refinement)
 - [Color and sharpness stabilization](#color-and-sharpness-stabilization)
 - [Preserving the exact input audio](#preserving-the-exact-input-audio)
 - [How chunk timing and context work](#how-chunk-timing-and-context-work)
@@ -191,41 +191,38 @@ Ref2va has no `audio_denoise`, `audio_noise_mask`, or `reference_image_each_chun
 | `fps` | FLOAT | Fixed `24.0`. Connect directly to the saver. |
 | `frame_count` | INT | `ceil(audio_samples × 24 / sample_rate)`. |
 | `report` | STRING / JSON | Connect to PreviewAny to inspect chunk boundaries, seeds, prompts, audio-lock state and correction settings. |
-| `latent` | LATENT | **One video-only latent of the whole stitched video**, re-encoded after color/detail correction. Direct input for the H3 latent upscaler; not a chunk list or just the last chunk. |
 | `positive` | CONDITIONING | Global prompt and image guidance for the complete video. Ref2va keeps its reference blocks; FL2VA keeps vision embeddings without its fixed-resolution first-frame anchor. |
 | `negative` | CONDITIONING | Empty conditioning, matching the generator's CFG 1 / no-negative-prompt setup. Use BasicGuider or CFG 1 for subsequent sampling. |
 
-## Whole-video latent outputs for upscaling
+## External video encoding and refinement
 
-Both lip-sync nodes append `latent`, `positive`, and `negative` after their original five outputs. Existing image/audio/report connections keep their port indices. Restart ComfyUI and reload the updated workflow to show the new ports.
+Both nodes return seven outputs: `images`, `audio`, `fps`, `frame_count`, `report`, `positive`, and `negative`. They do not export, accumulate, or re-encode a whole-video latent. Color/detail stabilization, original-image anchoring, and corrected-tail context remain active. After the last chunk, only global prompt/reference conditioning is rebuilt and copied to CPU.
 
-The node first assembles every generated chunk, removes overlap, applies enabled appearance correction, and crops to the source audio's duration. It then encodes that **complete stitched frame sequence** with the H3 video VAE. This avoids concatenating independently phased generation latents. Export uses at most 73 input frames per call, preserving the VAE's global 17-frame clip phase and final token trimming. The complete resulting latent stays in CPU RAM. This bounds temporary input conversions, but still requires encoding the entire video and does not guarantee a particular VRAM peak or speed.
+**Updating existing workflows:** the latent port and the `export_refinement` / `refinement_latent_source` controls are removed. Restart ComfyUI and refresh or recreate the lip-sync node. The original five ports keep their indices; reconnect positive/negative by name because they now occupy slots 5 and 6 (previously 6 and 7). Replace any old latent connection with your own VAE Encode output. Updated examples already use this layout.
 
-**`export_refinement` — BOOLEAN, default `true`:** keep enabled for whole-video latent upscaling/refinement. Set to `false` when you only need finished video/audio, and disconnect downstream refinement nodes. This skips the final video encode and global conditioning rebuild; `latent` returns `None`, and `positive`/`negative` return empty lists. Image/audio output, stabilization and temporal context remain active. Merely leaving the latent port disconnected does not skip export when this switch is enabled.
+For video-only generation, connect the corrected `images`, original `audio`, and `fps` to your saver. No extra whole-video encoding stage runs inside the lip-sync node.
 
-The terminal distinguishes **video VAE decode**, **context-tail VAE encode**, and **whole-video latent export**. A VAE load after the last sampling bar can be the final export, which previously had no progress messages. Export now reports each completed window and checks cancellation between windows. Smaller windows limit memory, but add some repeated encoding work for lookahead frames.
-
-Wire the whole latent into the installed **Minimax H3 Latent Upscaler (3D)**:
+When ready to refine, encode the corrected frames yourself with ComfyUI's native **VAE Encode** node and the **H3 video VAE**:
 
 ```text
-Lip-sync latent → H3 Latent Upscaler (3D), enable_chunking=true
-                → VAE Decode using the H3 video VAE
-                → Image From Batch, batch_index=0
-Lip-sync frame_count → Image From Batch.length
-Trimmed images + lip-sync audio + lip-sync fps → Save Video (Exact Audio)
+Corrected images (or frames loaded from your saved video)
+  → Repeat the final frame as needed to reach the H3 frame grid
+  → VAE Encode (pixels=frames, vae=H3 video VAE)
+  → H3 Latent Upscaler (3D), enable_chunking=true
+  → VAE Decode (H3 video VAE)
+  → Image From Batch, batch_index=0, length=original frame_count
+  → Save Video using original audio and fps=24
 ```
 
-Convert `Image From Batch.length` to an input and connect `frame_count` directly. Start with the upscaler's `align=32`, a suitable scale such as 2×, and its internal chunking enabled. The generator supplies a standard video tensor `[1, 24, T, H/16, W/16]`, not an AV NestedTensor. The upscaler does not need positive or negative conditioning for pure latent upscaling.
+Use `images` directly when you want to avoid an extra video-compression pass before refinement. You can also save first and load the video later. VAE encoding/reconstruction remains lossy; this path encodes the color/detail-corrected frames rather than the raw generated latents. The cost of encoding belongs to that separate encode node and still depends on video size.
 
-**Terminal padding:** the whole-video encode repeats the last corrected frame to reach the next H3 `17k+5` grid point. Only this temporary encoding view is padded; the normal `images`, `audio`, and `frame_count` outputs stay unchanged. After decoding the upscaled latent, keep the first `frame_count` frames. For example, 289 visible frames encode on a 294-frame grid, so remove the last 5 decoded frames. The report includes `latent_encoded_frame_count` and `latent_padding_frames`. Use the original `frame_count` connection because third-party nodes may discard the latent's extra metadata.
+**Pad before encoding:** repeat the last corrected frame until the count reaches the next `17k+5` grid point (at least five frames). The `report` provides `refinement_frame_count` and `refinement_padding_frames`; the generator's actual image/audio outputs are not padded. For example, 289 output frames need five repeats, giving 294 encoder input frames. You can select the last frame with `Image From Batch`, repeat it with `Repeat Image Batch`, and append it using `Image Batch`; skip this branch if no padding is needed. Native H3 encoding of an arbitrary unpadded frame count can omit the ending frames. After decoding/refining, trim back to the original `frame_count`.
 
-**Conditioning for later refinement:** `positive` is rebuilt from the global visual prompt and original images for the complete timeline. It excludes chunk-local motion markers and `chunk_prompts` suffixes, which have local times and cannot be treated as one global prompt. FL2VA's fixed-resolution first-frame latent anchor is also removed to avoid a spatial token mismatch after upscaling; its Qwen image embeddings remain. Ref2va references carry their own spatial dimensions and stay present. `negative` is an empty CONDITIONING, since no negative prompt was used during generation. If a separate refinement workflow needs CFG above 1 or negative text, create compatible negative conditioning there.
+**Positive and negative:** the positive output contains the global visual prompt and original image references for the full padded refinement timeline. It excludes chunk-local motion context and `chunk_prompts` suffixes. FL2VA retains vision embeddings and removes the fixed-resolution first-frame latent anchor so it can be used after upscaling. Ref2VA retains its reference blocks, which have their own spatial dimensions. Negative conditioning is empty, matching generation with CFG 1 / BasicGuider. Rebuilding guidance still encodes the prompt and reference images; it never encodes the generated video frames.
 
-For a separate **diffusion refinement** pass, connect the full-video positive/negative outputs to the appropriate sampler/guider. H3 sampling also needs a correctly aligned audio latent: encode the original recording with the H3 audio VAE, lock its noise mask to zero, and combine it with the upscaled video using **Concat AV Latent**. Its conditioning duration must cover the padded video grid; preserve the original AUDIO for final saving. Simply sending the video-only latent to an AV sampler does not supply speech conditioning.
+Pure latent upscaling does not use positive/negative conditioning. For a later diffusion refinement pass, connect them to the appropriate H3 sampler/guider. H3 AV sampling also needs a correctly aligned audio latent: encode the original audio with the H3 audio VAE, lock its audio noise mask, and combine it with the video latent through `Concat AV Latent`. Keep the original AUDIO for the final saver.
 
-The upscaler's `enable_chunking` applies to the **upscaling network only**. It does not automatically chunk a later diffusion sampler. Very long full-video diffusion refinement can exceed model memory/training duration; use an H3 refinement workflow that explicitly supports that duration or manages its own temporal windows. The outputs provide the complete video data; the original timeline Director's Refine port is still separate.
-
-The export path has also been checked with real H3 video-VAE and H3 3D upscaler weights on a 421-frame synthetic sequence: 430 padded frames encoded to `[1, 24, 127, 2, 2]`, upscaled 2× with six internal temporal chunks, and decoded to 430 frames at 64×64. This checks the full-latent interface and timing at small resolution, not full-resolution visual quality or a diffusion-refinement pass. The optional reproduction script is `tests/smoke_lipsync_export.py`.
+The upscaler's chunking covers its own network; it does not automatically chunk a later diffusion sampler. Use a refinement workflow that supports the full recording's duration or explicitly processes temporal windows.
 
 ## Color and sharpness stabilization
 
@@ -359,7 +356,7 @@ For additional implementation details, see [FL2VA timing and audio](docs/long-au
 | Frames become too soft or the grade changes too much | Lower the relevant strength toward `0`; check whether the appearance target matches the intended full composition. |
 | Visible seam or pose jump | Start at 22 context frames, stable framing and restrained motion. Try 39 context frames as a controlled comparison; there is no guaranteed seamless setting. |
 | GPU out of memory | Reduce resolution, sampled duration, or reference cost; use `ref_image_size=match` and enable cleanup. H3 weights still need sufficient memory. |
-| Sampling works but each video VAE decode spills into shared memory | Enable `clear_vram_between_chunks`. Both lip-sync nodes release sampling inputs and move the sampled video latent to CPU before decoding; with cleanup enabled, they also unload models before loading the video VAE. This leaves more VRAM for decoding, at the cost of model reloads. Whole-video latent/conditioning export runs after all chunks finish, so it adds a separate final encode rather than accumulating those outputs on GPU during chunk decoding. |
+| Sampling works but each video VAE decode spills into shared memory | Enable `clear_vram_between_chunks`. Both lip-sync nodes release sampling inputs and move the sampled video latent to CPU before decoding; with cleanup enabled, they also unload models before loading the video VAE. This leaves more VRAM for decoding, at the cost of model reloads. No whole-video latent export runs inside the lip-sync node. Any full-video encode is performed by your separate VAE Encode node. |
 | CPU RAM grows throughout generation | The complete output IMAGE tensor remains in RAM. Lower resolution or process shorter recordings. Reducing chunk size does not reduce the final frame buffer. |
 | Video timing changes after export | Keep saver fps at 24 or connect the generator's fps output; do not independently retime the frame sequence. |
 | MKV does not preview in the browser | Use a player supporting MKV and floating PCM. MP4/AAC is an alternative when sample-exact audio is not required. |

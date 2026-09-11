@@ -72,6 +72,7 @@ class Clip:
 
 class VideoVAE:
     def encode(self, frames):
+        assert len(frames) in (1, 22), 'Only original references and short context tails may be encoded'
         return torch.full((1, 24, 1 if len(frames) == 1 else mc.steps_for_frames(len(frames)), 2, 2),
                           float(frames.mean()) if len(frames) == 1 else 0.0)
 
@@ -139,7 +140,7 @@ def sample(**kwargs):
 
 audio = {'waveform': torch.sin(torch.arange(44100 * 12 + 11) * 0.02).reshape(1, 1, -1), 'sample_rate': 44100}
 with patch.object(ls, 'sample_single_stage', side_effect=sample):
-    images, output_audio, fps, count, report, full_latent, positive, negative = node().execute(
+    images, output_audio, fps, count, report, positive, negative = node().execute(
         model=None, clip=Clip(), video_vae=VideoVAE(), audio_vae=audio_vae, audio=audio,
         first_frame=torch.full((1, 32, 32, 3), 0.7), prompt='A person speaking.', width=32, height=32,
         chunk_seconds=5.17, clear_vram_between_chunks=False,
@@ -148,7 +149,6 @@ with patch.object(ls, 'sample_single_stage', side_effect=sample):
     )
 assert count == 289 and len(images) == 289 and fps == 24
 assert output_audio is audio and len(calls) == 3
-assert full_latent['samples'].shape[2] == mc.steps_for_frames(ls.minimax_align_frame_count(count))
 assert not positive[0][1].get('minimax_keyframes')
 assert negative == []
 print(json.dumps({'status': 'passed', 'chunks': len(calls), 'frames': count,
@@ -157,7 +157,7 @@ calls.clear()
 mode = 'ref2va'
 before = audio['waveform'].clone()
 with patch.object(ls, 'sample_single_stage', side_effect=sample):
-    images, output_audio, fps, count, report, full_latent, positive, negative = ref_node().execute(
+    images, output_audio, fps, count, report, positive, negative = ref_node().execute(
         model=None, clip=Clip(), video_vae=VideoVAE(), audio_vae=audio_vae, audio=audio,
         ref_image_1=torch.zeros(1, 32, 32, 3), ref_image_2=torch.ones(1, 32, 32, 3),
         prompt='The character in <Picture 1> in the background from <Picture 2>.',
@@ -170,12 +170,10 @@ assert count == len(images) == 289 and fps == 24 and len(calls) == 3
 assert output_audio is audio and torch.equal(output_audio['waveform'], before)
 assert json.loads(report)['source_audio_locked']
 assert json.loads(report)['context_source'] == 'corrected decoded tail'
-assert not full_latent['samples'].is_nested
-assert full_latent['samples'].shape[2] == mc.steps_for_frames(ls.minimax_align_frame_count(count))
 assert len(positive[0][1]['minimax_refs']) == 2 and not positive[0][1].get('minimax_keyframes')
 assert positive[0][1]['minimax_frame_count'] == ls.minimax_align_frame_count(count)
 assert negative == []
 print(json.dumps({'status': 'passed', 'mode': mode, 'chunks': len(calls), 'frames': count,
                   'real_audio_vae': bool(audio_weights), 'audio_unchanged': True,
                   'context_source': json.loads(report)['context_source'],
-                  'whole_video_latent_shape': list(full_latent['samples'].shape)}))
+                  'conditioning_frame_count': positive[0][1]['minimax_frame_count']}))
